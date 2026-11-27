@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 
+from attestory import __version__
 from attestory.cli import generate_report
 from attestory.engine import ATTESTORY_DIR, commit_file, diff_file_snapshots
 
@@ -14,7 +15,7 @@ SUPPORTED_EXTENSIONS = {".xlsx", ".pptx", ".html", ".csv"}
 def create_app(root: Path | None = None) -> FastAPI:
     """Create the local HTTP bridge scoped to a single workspace."""
     workspace = (root or Path.cwd()).resolve()
-    app = FastAPI(title="Attestory Local Audit API", version="0.3.0")
+    app = FastAPI(title="Attestory Local Audit API", version=__version__)
 
     def resolve_workspace_file(file_path: str) -> Path:
         candidate = Path(file_path).expanduser()
@@ -42,7 +43,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict:
-        return {"status": "ok", "version": "0.3.0"}
+        return {"status": "ok", "version": __version__}
 
     @app.get("/v1/context")
     async def context() -> dict:
