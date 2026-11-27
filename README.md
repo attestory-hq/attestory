@@ -19,7 +19,7 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 - **PowerPoint Semantic Diffs:** Extracts slide text, native table cells, and embedded chart values into Zstandard-compressed Parquet snapshots, with DuckDB-powered comparisons between versions.
 - **Dashboard & Data Lineage:** Audits HTML dashboard KPIs, table cells, and external telemetry references; fingerprints CSV row counts, schemas, null counts, and numeric summaries.
 - **Persistent Assertions & Receipts:** Configure formula and numeric guardrails in `.attestory/rules.yaml`, then generate self-contained HTML audit receipts.
-- **Native AI Continuity:** Drop `skills/claude-cowork/SKILL.md` into your workspace so Claude Cowork reads saved rules before editing and self-corrects formula mistakes before presenting results.
+- **Native AI Continuity:** Install the Claude Cowork / Claude Code skill directly into your workspace with `attestory install-skill`; it reads saved rules before editing and helps catch formula mistakes before presenting results.
 
 ---
 
@@ -36,6 +36,9 @@ See the [sample HTML receipt](docs/examples/sample_receipt.html) in your browser
 ```bash
 # Run the interactive demo immediately (zero setup required)
 uvx attestory demo
+
+# Install the Claude Cowork / Claude Code skill into your current workspace
+attestory install-skill
 
 # Or install globally with uv / pip
 uv tool install attestory

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "attestory"
-version = "0.3.1"
+version = "0.3.2"
 description = "Local version control, deterministic math auditing, and semantic diffs for AI-generated spreadsheets and reports."
 readme = "README.md"
 requires-python = ">=3.11"
