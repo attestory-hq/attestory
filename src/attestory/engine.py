@@ -7,6 +7,8 @@ import duckdb
 import yaml
 
 from attestory.parsers.excel import extract_xlsx_to_parquet
+from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
+from attestory.rules import evaluate_rules
 
 ATTESTORY_DIR = ".attestory"
 
@@ -35,6 +37,9 @@ def init_workspace(root: Path) -> Path:
                         "flag_hardcoded_formula_overrides": True,
                         "flag_excel_errors": True,
                     },
+                    "must_be_formula": [],
+                    "assertions": [],
+                    "cross_file_checks": [],
                     "business_rules": [
                         "Add recurring metric definitions or exclusions here for Claude/ChatGPT continuity."
                     ],
@@ -116,11 +121,23 @@ def diff_snapshots(prev_pq: Path, curr_pq: Path) -> dict:
     }
 
 
+def diff_file_snapshots(prev_pq: Path, curr_pq: Path, file_name: str) -> dict:
+    if Path(file_name).suffix.lower() == ".pptx":
+        return diff_pptx_snapshots(prev_pq, curr_pq)
+    if Path(file_name).suffix.lower() == ".xlsx":
+        return diff_snapshots(prev_pq, curr_pq)
+    raise ValueError(f"Unsupported file type: {file_name}")
+
+
 def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
     """Create a new Parquet snapshot for target_file, diff against prior version, and append to changelog.md."""
     meta_dir = root / ATTESTORY_DIR
     if not meta_dir.exists():
         init_workspace(root)
+
+    extension = target_file.suffix.lower()
+    if extension not in {".xlsx", ".pptx"}:
+        raise ValueError("Attestory supports .xlsx and .pptx files.")
 
     manifest_path = meta_dir / "history.json"
     history = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -130,14 +147,19 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
     stem = target_file.stem.replace(" ", "_")
 
     curr_pq = meta_dir / "snapshots" / f"{stem}_v{next_ver}.parquet"
-    stats = extract_xlsx_to_parquet(target_file, curr_pq)
+    stats = (
+        extract_xlsx_to_parquet(target_file, curr_pq)
+        if extension == ".xlsx"
+        else extract_pptx_to_parquet(target_file, curr_pq)
+    )
     file_hash = sha256_file(target_file)
 
     diff_report = None
     if file_commits:
         prev_pq = root / file_commits[-1]["snapshot"]
-        diff_report = diff_snapshots(prev_pq, curr_pq)
+        diff_report = diff_file_snapshots(prev_pq, curr_pq, target_file.name)
 
+    rule_violations = evaluate_rules(root, target_file, curr_pq, history)
     record = {
         "version": next_ver,
         "file": target_file.name,
@@ -146,13 +168,14 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
         "message": message or f"Snapshot v{next_ver}",
         "snapshot": str(curr_pq.relative_to(root)),
         "stats": stats,
+        "rule_violations": rule_violations,
         "diff_summary": {
             "total_changes": diff_report["total_changes"] if diff_report else 0,
-            "hardcode_overrides": len(diff_report["hardcode_overrides"])
+            "hardcode_overrides": len(diff_report.get("hardcode_overrides", []))
             if diff_report
             else 0,
             "formula_changes": len(diff_report["formula_changes"])
-            if diff_report
+            if diff_report and "formula_changes" in diff_report
             else 0,
         },
     }
@@ -162,17 +185,36 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
     lines = [
         f"## `{target_file.name}` — v{next_ver} ({record['timestamp']})",
         f"- **SHA-256:** `{file_hash[:16]}...` | **Note:** {record['message']}",
-        f"- **Cells:** {stats['populated_cells']} | **Excel Errors:** {len(stats['errors'])}",
     ]
-    if diff_report:
+    if extension == ".xlsx":
         lines.append(
-            f"- **Diff vs v{next_ver - 1}:** {diff_report['total_changes']} changes "
-            f"({len(diff_report['hardcode_overrides'])} hardcoded formula overrides, "
-            f"{len(diff_report['formula_changes'])} formula edits)"
+            f"- **Cells:** {stats['populated_cells']} | **Excel Errors:** {len(stats['errors'])}"
         )
-        for ov in diff_report["hardcode_overrides"][:10]:
+    else:
+        lines.append(
+            f"- **Slides:** {stats['slides']} | **Elements:** {stats['elements']}"
+        )
+    if diff_report:
+        if extension == ".xlsx":
             lines.append(
-                f"  - ⚠️ **HARDCODE OVERRIDE** at `{ov['location']}`: `{ov['old_formula']}` -> `{ov['new_hardcoded_val']}`"
+                f"- **Diff vs v{next_ver - 1}:** {diff_report['total_changes']} changes "
+                f"({len(diff_report['hardcode_overrides'])} hardcoded formula overrides, "
+                f"{len(diff_report['formula_changes'])} formula edits)"
+            )
+            for ov in diff_report["hardcode_overrides"][:10]:
+                lines.append(
+                    f"  - ⚠️ **HARDCODE OVERRIDE** at `{ov['location']}`: `{ov['old_formula']}` -> `{ov['new_hardcoded_val']}`"
+                )
+        else:
+            lines.append(
+                f"- **Diff vs v{next_ver - 1}:** {diff_report['total_changes']} presentation changes"
+            )
+    if rule_violations:
+        lines.append(f"- **Rule violations:** {len(rule_violations)}")
+        for violation in rule_violations:
+            lines.append(
+                f"  - ⚠️ **RULE VIOLATION** ({violation['rule']}) at "
+                f"`{violation['location']}`: {violation.get('description') or violation['expected']}"
             )
     lines.append("\n")
 

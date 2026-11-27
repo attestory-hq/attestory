@@ -1,0 +1,131 @@
+openapi: 3.1.0
+info:
+  title: Attestory Local Audit Actions
+  version: 0.2.0
+  description: >
+    Action contract for an HTTPS bridge that invokes Attestory against a
+    configured local workspace. The bridge must keep files and snapshots local.
+servers:
+  - url: https://your-attestory-action-bridge.example.com
+    description: Replace with the HTTPS URL of your secured local bridge.
+paths:
+  /commit:
+    post:
+      operationId: commitFile
+      summary: Audit and snapshot an Excel workbook or PowerPoint presentation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  description: Workspace-relative .xlsx or .pptx file path
+                message:
+                  type: string
+                  description: Optional audit commit note
+      responses:
+        "200":
+          description: Snapshot and rule evaluation completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Receipt"
+        "400":
+          description: Unsupported file or invalid request
+  /diff:
+    get:
+      operationId: diffFile
+      summary: Compare the two latest snapshots of a tracked file
+      parameters:
+        - in: query
+          name: file
+          required: true
+          schema:
+            type: string
+          description: Workspace-relative .xlsx or .pptx file path
+      responses:
+        "200":
+          description: Semantic snapshot diff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file:
+                    type: string
+                  from_version:
+                    type: integer
+                  to_version:
+                    type: integer
+                  total_changes:
+                    type: integer
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        "404":
+          description: File has no sufficient commit history
+  /report:
+    post:
+      operationId: createReport
+      summary: Generate the standalone HTML audit receipt for the latest snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  description: Workspace-relative .xlsx or .pptx file path
+      responses:
+        "200":
+          description: Receipt HTML generated locally
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file, status]
+                properties:
+                  file:
+                    type: string
+                    description: Workspace-relative path to the generated HTML report
+                  status:
+                    type: string
+                    enum: [VERIFIED, NEEDS REVIEW]
+                  html:
+                    type: string
+                    description: Optional self-contained HTML document
+        "404":
+          description: File has no committed snapshot
+components:
+  schemas:
+    Receipt:
+      type: object
+      required: [file, version, sha256, rule_violations]
+      properties:
+        file:
+          type: string
+        version:
+          type: integer
+        sha256:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        total_changes:
+          type: integer
+        rule_violations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
