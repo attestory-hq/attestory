@@ -1,0 +1,30 @@
+version: 1
+guardrails:
+  flag_hardcoded_formula_overrides: true
+  flag_excel_errors: true
+must_be_formula:
+  - Revenue!B4
+assertions:
+  - location: Revenue!B4
+    min_value: 100000
+    description: Revenue total must remain above the approved floor.
+cross_file_checks:
+  - pptx_file: Board_Deck.pptx
+    xlsx_file: Q4_Forecast.xlsx
+    slide_num: 2
+    element_type: text
+    label: ARR
+    location: Revenue!B4
+    tolerance: 0.01
+    description: Board slide ARR must match the forecast.
+  - file_a: actuals.csv
+    file_b: Q4_Forecast.xlsx
+    metric_a:
+      column_name: Revenue
+      label: SUM
+    metric_b:
+      location: Revenue!B4
+    tolerance: 0.01
+    description: Forecast revenue must reconcile to source actuals.
+business_rules:
+  - Report monetary values in USD unless a source explicitly states otherwise.
