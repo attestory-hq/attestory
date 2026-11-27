@@ -40,6 +40,9 @@ uvx attestory demo
 # Install the Claude Cowork / Claude Code skill into your current workspace
 attestory install-skill
 
+# Install the Claude Code skill and automatically audit supported edits
+attestory install-skill --target claude-code --hook
+
 # Or install globally with uv / pip
 uv tool install attestory
 # Or: pip install attestory
@@ -78,6 +81,34 @@ attestory watch
 
 Use `attestory watch --recursive` to include subdirectories, or tune its save
 debounce with `attestory watch --debounce 1.0`.
+
+## Python API and agent hooks
+
+The Python API runs in-process, without starting a server or invoking the CLI:
+
+```python
+import attestory
+
+attestory.snapshot("Q4_Forecast.xlsx", message="Approved baseline")
+# After editing:
+result = attestory.verify("Q4_Forecast.xlsx", message="Updated forecast")
+if not result.passed:
+    print(result.to_dict())
+```
+
+`snapshot` and `verify` create local snapshots. `verify` returns an
+`attestory.AuditResult` with hardcode regressions, formula errors, rule
+violations, and summary statistics. Its `to_dict()` shape matches the compact
+JSON emitted by `attestory commit`, `diff`, `status`, and `report` with
+`--json`.
+
+For Claude Code, install the skill and opt into a project-level `PostToolUse`
+hook with `attestory install-skill --target claude-code --hook`. The hook
+audits `.xlsx`, `.pptx`, and `.csv` files after `Write`, `Edit`, or `MultiEdit`
+tools run. It is installed only in `.claude/settings.json`, preserves existing
+settings, and does not start a daemon. The `attestory` command must be
+available on Claude Code's `PATH`. Claude Cowork can use the installed skill;
+the project hook is specific to Claude Code.
 
 ## Rules and cross-file checks
 
