@@ -1,7 +1,11 @@
 # Attestory
 
+[![CI](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml/badge.svg)](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+
 **Make sure your numbers are Attestoried.**
-Local version control, deterministic formula auditing, and semantic diffs for AI-generated Excel (`.xlsx`) and PowerPoint (`.pptx`) deliverables.
+Local version control, deterministic formula auditing, and semantic diffs for AI-generated Excel (`.xlsx`), PowerPoint (`.pptx`), HTML dashboards, and CSV source data.
 
 ---
 
@@ -12,6 +16,7 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 - **Zero Cloud Uploads Required:** Structural snapshots are stored locally as Zstandard-compressed **Apache Parquet** files inside `.attestory/`.
 - **Deterministic Math & Hardcode Audits:** Uses `openpyxl` and **DuckDB** SQL diffs to catch silent formula-to-hardcode overwrites and Excel formula errors in milliseconds.
 - **PowerPoint Semantic Diffs:** Extracts slide text, native table cells, and embedded chart values into Zstandard-compressed Parquet snapshots, with DuckDB-powered comparisons between versions.
+- **Dashboard & Data Lineage:** Audits HTML dashboard KPIs, table cells, and external telemetry references; fingerprints CSV row counts, schemas, null counts, and numeric summaries.
 - **Persistent Assertions & Receipts:** Configure formula and numeric guardrails in `.attestory/rules.yaml`, then generate self-contained HTML audit receipts.
 - **Native AI Continuity:** Drop `skills/claude-cowork/SKILL.md` into your workspace so Claude Cowork reads saved rules before editing and self-corrects formula mistakes before presenting results.
 
@@ -21,6 +26,9 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 
 ```bash
 pip install -e .
+
+# Try the complete workflow without preparing files
+attestory demo
 
 # 1. Initialize .attestory/ in your working folder
 attestory init
@@ -41,6 +49,11 @@ attestory diff Board_Deck.pptx
 
 # Create a standalone report in .attestory/reports/
 attestory report Board_Deck.pptx
+
+# Snapshot and compare source data or an HTML dashboard
+attestory commit actuals.csv -m "Approved actuals"
+attestory commit executive_dashboard.html -m "Dashboard baseline"
+attestory diff actuals.csv
 ```
 
 ## Rules and cross-file checks
@@ -72,16 +85,34 @@ cross_file_checks:
 ```
 
 Numeric assertions support `min_value`, `max_value`, and `equals`. Cross-file
-checks select a chart/table/text item by slide and `label`, `metric` text, or
-`element_id`, then compare its first numeric value with the Excel cell. Rule
-violations appear in the terminal receipt, commit history, and changelog.
+checks can compare any supported snapshots: Excel cells, PowerPoint slide
+metrics, HTML KPIs, or CSV summary statistics. Existing `pptx_file` /
+`xlsx_file` rules remain supported; generic rules use `file_a` and `file_b`
+with selectors such as `metric_a: {column_name: Revenue, label: SUM}` and
+`metric_b: {location: Revenue!B4}`. Rule violations appear in the terminal
+receipt, commit history, and changelog.
+
+HTML snapshots parse KPI/metric elements and table cells and flag externally
+hosted scripts or tracking images for review. CSV snapshots track dataset row
+counts, column types, null counts, and numeric `SUM`, `AVG`, `MIN`, and `MAX`
+values, making source-data drift visible alongside workbook and presentation
+changes.
 
 ## ChatGPT Actions
 
-`skills/chatgpt-action/openapi.yaml` describes the commit, diff, and report
-operations for an Action-compatible local bridge. ChatGPT Actions require an
-HTTPS-reachable API adapter; the OpenAPI file is a contract and does not itself
-expose a local CLI process to ChatGPT.
+Install and start the local FastAPI bridge with:
+
+```bash
+pip install "attestory[server]"
+attestory serve --host 127.0.0.1 --port 8765
+```
+
+The bridge provides `/health`, `/v1/context`, `/v1/commit`, `/v1/diff/{filename}`,
+and `/v1/report/{filename}` as described in
+[`skills/chatgpt-action/openapi.yaml`](skills/chatgpt-action/openapi.yaml).
+It is scoped to the current workspace and binds to localhost by default.
+Do not expose it directly to an untrusted network; ChatGPT Actions need a
+separately secured HTTPS adapter or tunnel.
 
 ---
 

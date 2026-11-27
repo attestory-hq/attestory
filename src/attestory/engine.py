@@ -6,7 +6,12 @@ from pathlib import Path
 import duckdb
 import yaml
 
+from attestory.parsers.csv_extract import (
+    diff_csv_snapshots,
+    extract_csv_to_parquet,
+)
 from attestory.parsers.excel import extract_xlsx_to_parquet
+from attestory.parsers.html import diff_html_snapshots, extract_html_to_parquet
 from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
 from attestory.rules import evaluate_rules
 
@@ -122,10 +127,15 @@ def diff_snapshots(prev_pq: Path, curr_pq: Path) -> dict:
 
 
 def diff_file_snapshots(prev_pq: Path, curr_pq: Path, file_name: str) -> dict:
-    if Path(file_name).suffix.lower() == ".pptx":
+    extension = Path(file_name).suffix.lower()
+    if extension == ".pptx":
         return diff_pptx_snapshots(prev_pq, curr_pq)
-    if Path(file_name).suffix.lower() == ".xlsx":
+    if extension == ".xlsx":
         return diff_snapshots(prev_pq, curr_pq)
+    if extension == ".html":
+        return diff_html_snapshots(prev_pq, curr_pq)
+    if extension == ".csv":
+        return diff_csv_snapshots(prev_pq, curr_pq)
     raise ValueError(f"Unsupported file type: {file_name}")
 
 
@@ -136,8 +146,8 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
         init_workspace(root)
 
     extension = target_file.suffix.lower()
-    if extension not in {".xlsx", ".pptx"}:
-        raise ValueError("Attestory supports .xlsx and .pptx files.")
+    if extension not in {".xlsx", ".pptx", ".html", ".csv"}:
+        raise ValueError("Attestory supports .xlsx, .pptx, .html, and .csv files.")
 
     manifest_path = meta_dir / "history.json"
     history = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -147,11 +157,13 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
     stem = target_file.stem.replace(" ", "_")
 
     curr_pq = meta_dir / "snapshots" / f"{stem}_v{next_ver}.parquet"
-    stats = (
-        extract_xlsx_to_parquet(target_file, curr_pq)
-        if extension == ".xlsx"
-        else extract_pptx_to_parquet(target_file, curr_pq)
-    )
+    extractors = {
+        ".xlsx": extract_xlsx_to_parquet,
+        ".pptx": extract_pptx_to_parquet,
+        ".html": extract_html_to_parquet,
+        ".csv": extract_csv_to_parquet,
+    }
+    stats = extractors[extension](target_file, curr_pq)
     file_hash = sha256_file(target_file)
 
     diff_report = None
@@ -190,9 +202,18 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
         lines.append(
             f"- **Cells:** {stats['populated_cells']} | **Excel Errors:** {len(stats['errors'])}"
         )
-    else:
+    elif extension == ".pptx":
         lines.append(
             f"- **Slides:** {stats['slides']} | **Elements:** {stats['elements']}"
+        )
+    elif extension == ".html":
+        lines.append(
+            f"- **HTML elements:** {stats['elements']} | "
+            f"**External references:** {stats['external_references']}"
+        )
+    else:
+        lines.append(
+            f"- **CSV rows:** {stats['rows']} | **Columns:** {stats['columns']}"
         )
     if diff_report:
         if extension == ".xlsx":
@@ -205,16 +226,23 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
                 lines.append(
                     f"  - ⚠️ **HARDCODE OVERRIDE** at `{ov['location']}`: `{ov['old_formula']}` -> `{ov['new_hardcoded_val']}`"
                 )
-        else:
+        elif extension == ".pptx":
             lines.append(
                 f"- **Diff vs v{next_ver - 1}:** {diff_report['total_changes']} presentation changes"
+            )
+        else:
+            lines.append(
+                f"- **Diff vs v{next_ver - 1}:** {diff_report['total_changes']} "
+                f"{'HTML' if extension == '.html' else 'CSV'} changes"
             )
     if rule_violations:
         lines.append(f"- **Rule violations:** {len(rule_violations)}")
         for violation in rule_violations:
             lines.append(
                 f"  - ⚠️ **RULE VIOLATION** ({violation['rule']}) at "
-                f"`{violation['location']}`: {violation.get('description') or violation['expected']}"
+                f"`{violation['location']}`: "
+                f"{violation.get('description') or violation['expected']} "
+                f"(expected: {violation.get('expected')}, actual: {violation.get('actual')})"
             )
     lines.append("\n")
 

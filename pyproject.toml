@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "attestory"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local version control, deterministic math auditing, and semantic diffs for AI-generated spreadsheets and reports."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,12 +19,23 @@ dependencies = [
     "pyarrow>=17.0.0",
     "pyyaml>=6.0.1",
     "python-pptx>=1.0.2",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.2.0",
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.9",
+]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.6.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]

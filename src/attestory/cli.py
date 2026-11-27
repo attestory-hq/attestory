@@ -36,21 +36,25 @@ def init():
 @app.command()
 def commit(
     file: Path = typer.Argument(
-        ..., exists=True, help="Path to the .xlsx or .pptx file to audit and snapshot."
+        ..., exists=True, help="Path to an .xlsx, .pptx, .html, or .csv file to audit."
     ),
     message: str = typer.Option(
         "", "-m", "--message", help="Optional note describing this update."
     ),
 ):
-    """Audit and snapshot an .xlsx workbook or .pptx presentation."""
+    """Audit and snapshot a supported local file."""
     result = commit_file(Path.cwd(), file.resolve(), message=message)
     rec = result["record"]
     diff = result["diff"]
 
     status_color = "green"
-    if rec["rule_violations"] or (
-        file.suffix.lower() == ".xlsx"
-        and (rec["stats"]["errors"] or (diff and diff.get("hardcode_overrides")))
+    if (
+        rec["rule_violations"]
+        or (
+            file.suffix.lower() == ".xlsx"
+            and (rec["stats"]["errors"] or (diff and diff.get("hardcode_overrides")))
+        )
+        or (file.suffix.lower() == ".html" and rec["stats"]["external_references"])
     ):
         status_color = "yellow"
 
@@ -58,15 +62,26 @@ def commit(
         f"[bold]File:[/bold] {rec['file']}  |  [bold]Version:[/bold] v{rec['version']}",
         f"[bold]SHA-256:[/bold] {rec['sha256'][:20]}...",
     ]
-    if file.suffix.lower() == ".xlsx":
+    extension = file.suffix.lower()
+    if extension == ".xlsx":
         summary_lines.append(
             f"[bold]Populated Cells:[/bold] {rec['stats']['populated_cells']}  |  "
             f"[bold]Formula Errors:[/bold] {len(rec['stats']['errors'])}"
         )
-    else:
+    elif extension == ".pptx":
         summary_lines.append(
             f"[bold]Slides:[/bold] {rec['stats']['slides']}  |  "
             f"[bold]Extracted Elements:[/bold] {rec['stats']['elements']}"
+        )
+    elif extension == ".html":
+        summary_lines.append(
+            f"[bold]HTML Elements:[/bold] {rec['stats']['elements']}  |  "
+            f"[bold]External References:[/bold] {rec['stats']['external_references']}"
+        )
+    else:
+        summary_lines.append(
+            f"[bold]CSV Rows:[/bold] {rec['stats']['rows']}  |  "
+            f"[bold]Columns:[/bold] {rec['stats']['columns']}"
         )
 
     if diff:
@@ -76,10 +91,15 @@ def commit(
                 f"([red]{len(diff['hardcode_overrides'])} hardcode overrides[/red], "
                 f"{len(diff['formula_changes'])} formula edits, {len(diff['value_changes'])} value updates)"
             )
-        else:
+        elif extension == ".pptx":
             summary_lines.append(
                 f"[bold]Changes vs v{rec['version'] - 1}:[/bold] "
                 f"{diff['total_changes']} presentation changes"
+            )
+        else:
+            summary_lines.append(
+                f"[bold]Changes vs v{rec['version'] - 1}:[/bold] "
+                f"{diff['total_changes']} {extension[1:].upper()} changes"
             )
 
     console.print(
@@ -91,7 +111,7 @@ def commit(
     )
 
     if diff and diff.get("hardcode_overrides"):
-        table = Table(title="⚠️ Formula Overwritten With Hardcoded Value", style="red")
+        table = Table(title="⚠️ HARDCODE OVERRIDE", style="red")
         table.add_column("Location")
         table.add_column("Previous Formula")
         table.add_column("New Hardcoded Value")
@@ -119,10 +139,10 @@ def commit(
 @app.command()
 def diff(
     file: Path = typer.Argument(
-        ..., help="Filename (e.g. Q4_Forecast.xlsx) to compare last two snapshots."
+        ..., help="Filename (.xlsx, .pptx, .html, or .csv) to compare snapshots."
     ),
 ):
-    """Compare the latest two Parquet snapshots of a tracked workbook or presentation."""
+    """Compare the latest two Parquet snapshots of a tracked file."""
     root = Path.cwd()
     manifest = root / ATTESTORY_DIR / "history.json"
     if not manifest.exists():
@@ -161,32 +181,41 @@ def diff(
             console.print(
                 f"  [cyan]VALUE[/cyan]    {item['location']}: {item['old_val']} -> {item['new_val']}"
             )
-    else:
+    elif "changes" in res:
         for item in res["changes"][:50]:
+            if "slide_num" in item:
+                description = (
+                    f"SLIDE {item['slide_num']} {item['element_type'].upper()} "
+                    f"{item['label'] or item['element_id']}"
+                )
+            elif "metric_type" in item:
+                description = (
+                    f"{item['metric_type'].upper()} {item['column_name']} "
+                    f"{item['label']}"
+                )
+            else:
+                description = (
+                    f"{item['element_type'].upper()} "
+                    f"{item['label'] or item['element_id']}"
+                )
             console.print(
-                f"  [cyan]SLIDE {item['slide_num']} {item['element_type'].upper()}[/cyan] "
-                f"{item['label'] or item['element_id']}: {item['old_val']} -> {item['new_val']}"
+                f"  [cyan]{description}[/cyan]: {item['old_val']} -> {item['new_val']}"
             )
 
 
-@app.command()
-def report(
-    file: Path = typer.Argument(
-        ..., help="Tracked .xlsx or .pptx file to create an HTML audit receipt for."
-    ),
-):
-    """Generate a standalone HTML audit receipt for the latest snapshot."""
-    root = Path.cwd()
+def generate_report(root: Path, filename: str) -> dict:
+    """Create a self-contained HTML receipt for the latest snapshot."""
+    file = Path(filename)
     history_path = root / ATTESTORY_DIR / "history.json"
     if not history_path.exists():
-        console.print("[red]No .attestory/ history found. Run `attestory init` first.[/red]")
-        raise typer.Exit(1)
+        raise FileNotFoundError(
+            "No .attestory/ history found. Run `attestory init` first."
+        )
 
     history = json.loads(history_path.read_text(encoding="utf-8"))
     commits = [entry for entry in history["commits"] if entry["file"] == file.name]
     if not commits:
-        console.print(f"[red]No commits recorded for {file.name}.[/red]")
-        raise typer.Exit(1)
+        raise FileNotFoundError(f"No commits recorded for {file.name}.")
 
     latest = commits[-1]
     diff = (
@@ -205,6 +234,7 @@ def report(
         latest.get("stats", {}).get("errors")
         or hardcodes
         or violations
+        or latest.get("stats", {}).get("external_references")
     )
     status = "NEEDS REVIEW" if review_needed else "VERIFIED"
     total_changes = diff["total_changes"] if diff else 0
@@ -212,19 +242,32 @@ def report(
     if diff is None:
         rows = []
     elif "changes" in diff:
-        rows = [
-            (
-                (
+        rows = []
+        for change in diff["changes"]:
+            if "slide_num" in change:
+                label = (
                     f"Slide {change['slide_num']} · {change['element_type']} · "
                     f"{change['label'] or change['element_id']}"
-                ),
-                change["old_val"],
-                change["new_val"],
-                change["numeric_delta"],
-                change["element_type"],
+                )
+            elif "metric_type" in change:
+                label = (
+                    f"{change['metric_type']} · {change['column_name']} · "
+                    f"{change['label']}"
+                )
+            else:
+                label = (
+                    f"{change['element_type']} · "
+                    f"{change['label'] or change['element_id']}"
+                )
+            rows.append(
+                (
+                    label,
+                    change["old_val"],
+                    change["new_val"],
+                    change.get("numeric_delta"),
+                    change.get("element_type", change.get("metric_type", "change")),
+                )
             )
-            for change in diff["changes"]
-        ]
     else:
         rows = []
         for category, entries in (
@@ -237,11 +280,17 @@ def report(
                     (
                         change["location"],
                         change.get("old_val", change.get("old_formula", "")),
-                        change.get("new_val", change.get("new_hardcoded_val", change.get("new_formula", ""))),
+                        change.get(
+                            "new_val",
+                            change.get(
+                                "new_hardcoded_val", change.get("new_formula", "")
+                            ),
+                        ),
                         "",
                         category,
                     )
                 )
+
     def render_diff_row(row):
         label, old, new, delta, category = row
         category_class = {
@@ -270,27 +319,28 @@ def report(
     )
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Attestory Receipt — {escape(latest['file'])} v{latest['version']}</title>
+<title>Attestory Receipt — {escape(latest["file"])} v{latest["version"]}</title>
 <style>
 :root{{color-scheme:light dark;--bg:#f4f6fa;--card:#fff;--ink:#172033;--muted:#667085;--line:#dce2eb;--accent:#2563eb;}}
 @media(prefers-color-scheme:dark){{:root{{--bg:#111827;--card:#1f2937;--ink:#f3f4f6;--muted:#aab4c4;--line:#374151;--accent:#60a5fa;}}}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}}
 main{{max-width:1100px;margin:40px auto;padding:0 24px}}header,.card,.diff{{background:var(--card);border:1px solid var(--line);border-radius:14px}}
-header{{padding:26px;margin-bottom:18px}}h1{{margin:0 0 8px;font-size:25px}}p,.muted{{color:var(--muted)}}.badge{{display:inline-block;padding:6px 12px;border-radius:20px;font-weight:750;background:{'#b42318' if review_needed else '#067647'};color:white}}
+header{{padding:26px;margin-bottom:18px}}h1{{margin:0 0 8px;font-size:25px}}p,.muted{{color:var(--muted)}}.badge{{display:inline-block;padding:6px 12px;border-radius:20px;font-weight:750;background:{"#b42318" if review_needed else "#067647"};color:white}}
 .meta{{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:18px}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}}
 .card{{padding:18px}}.card span{{display:block;color:var(--muted);font-size:13px}}.card strong{{font-size:26px}}
 .diff{{overflow:hidden}}table{{border-collapse:collapse;width:100%;font-size:14px}}th,td{{padding:12px 14px;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}}
 th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)}}tbody tr:nth-child(even){{background:color-mix(in srgb,var(--accent) 4%,var(--card))}}.change-hardcode td:last-child{{color:#b42318;font-weight:700}}.change-formula td:last-child{{color:#b54708;font-weight:700}}.change-value td:last-child,.change-chart td:last-child{{color:#067647;font-weight:700}}.change-text td:last-child,.change-table td:last-child{{color:var(--accent);font-weight:700}}.empty{{text-align:center;color:var(--muted);padding:30px}}.violations{{color:#b42318}}
 @media print{{:root{{color-scheme:light}}body{{background:white}}main{{margin:0 auto}}}}
 </style></head><body><main>
-<header><span class="badge">{status}</span><h1>Attestory Receipt</h1><div>{escape(latest['file'])} · Version {latest['version']}</div>
-<div class="meta"><span><strong>SHA-256</strong> {escape(latest['sha256'])}</span>
-<span><strong>Timestamp</strong> {escape(latest['timestamp'])}</span>
-<span><strong>Commit note</strong> {escape(latest['message'])}</span></div></header>
+<header><span class="badge">{status}</span><h1>Attestory Receipt</h1><div>{escape(latest["file"])} · Version {latest["version"]}</div>
+<div class="meta"><span><strong>SHA-256</strong> {escape(latest["sha256"])}</span>
+<span><strong>Timestamp</strong> {escape(latest["timestamp"])}</span>
+<span><strong>Commit note</strong> {escape(latest["message"])}</span></div></header>
 <section class="cards"><div class="card"><span>Total Changes</span><strong>{total_changes}</strong></div>
 <div class="card"><span>Hardcode Overrides</span><strong>{hardcodes}</strong></div>
 <div class="card"><span>Formula Edits</span><strong>{formulas}</strong></div>
-<div class="card"><span>Rule Violations</span><strong>{len(violations)}</strong></div></section>
+<div class="card"><span>Rule Violations</span><strong>{len(violations)}</strong></div>
+<div class="card"><span>External References</span><strong>{latest.get("stats", {}).get("external_references", 0)}</strong></div></section>
 {"<section class='card violations'><strong>Rule violations</strong><ul>" + violation_html + "</ul></section>" if violations else ""}
 <section class="diff"><table><thead><tr><th>Element</th><th>Previous</th><th>Current</th><th>Numeric delta</th><th>Change type</th></tr></thead>
 <tbody>{row_html}</tbody></table></section>
@@ -300,7 +350,36 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
     report_stem = Path(latest["file"]).stem.replace(" ", "_")
     report_path = reports_dir / f"{report_stem}_v{latest['version']}_receipt.html"
     report_path.write_text(html, encoding="utf-8")
-    console.print(f"[green]HTML audit receipt written to {report_path}[/green]")
+    return {
+        "path": str(report_path.relative_to(root)),
+        "status": status,
+        "summary": {
+            "file": latest["file"],
+            "version": latest["version"],
+            "total_changes": total_changes,
+            "hardcode_overrides": hardcodes,
+            "formula_changes": formulas,
+            "rule_violations": len(violations),
+            "external_references": latest.get("stats", {}).get(
+                "external_references", 0
+            ),
+        },
+    }
+
+
+@app.command()
+def report(
+    file: Path = typer.Argument(
+        ..., help="Tracked .xlsx, .pptx, .html, or .csv file to report on."
+    ),
+):
+    """Generate a standalone HTML audit receipt for the latest snapshot."""
+    try:
+        result = generate_report(Path.cwd(), file.name)
+    except FileNotFoundError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(f"[green]HTML audit receipt written to {result['path']}[/green]")
 
 
 @app.command()
@@ -342,6 +421,128 @@ def log(
             c["message"],
         )
     console.print(table)
+
+
+@app.command()
+def demo(
+    directory: Path = typer.Option(
+        Path("./attestory-demo"),
+        "--dir",
+        help="Directory to create the self-contained demonstration workspace in.",
+    ),
+):
+    """Create and run a five-second example of Attestory's audit workflow."""
+    target = directory.expanduser().resolve()
+    if target.exists() and any(target.iterdir()):
+        console.print(
+            f"[red]Demo directory is not empty: {target}. Choose an empty directory.[/red]"
+        )
+        raise typer.Exit(1)
+    target.mkdir(parents=True, exist_ok=True)
+    meta_dir = init_workspace(target)
+    rules = {
+        "version": 1,
+        "guardrails": {
+            "flag_hardcoded_formula_overrides": True,
+            "flag_excel_errors": True,
+        },
+        "must_be_formula": ["Revenue!B4"],
+        "assertions": [],
+        "cross_file_checks": [
+            {
+                "pptx_file": "Board_Deck.pptx",
+                "xlsx_file": "Q4_Forecast.xlsx",
+                "slide_num": 2,
+                "element_type": "text",
+                "label": "ARR",
+                "location": "Revenue!B4",
+                "tolerance": 0.01,
+                "description": "Slide 2 ARR must match the forecast total.",
+            }
+        ],
+        "business_rules": [],
+    }
+    import yaml
+
+    (meta_dir / "rules.yaml").write_text(
+        yaml.safe_dump(rules, sort_keys=False), encoding="utf-8"
+    )
+
+    import openpyxl
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    workbook_path = target / "Q4_Forecast.xlsx"
+
+    def save_workbook(hardcoded: bool) -> None:
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Revenue"
+        sheet["A1"] = "Segment"
+        sheet["B1"] = "ARR"
+        sheet["A2"] = "Enterprise"
+        sheet["B2"] = 250000
+        sheet["A3"] = "Mid-Market"
+        sheet["B3"] = 162000
+        sheet["A4"] = "Total"
+        sheet["B4"] = 428000 if hardcoded else "=SUM(B2:B3)"
+        workbook.save(workbook_path)
+
+    save_workbook(hardcoded=False)
+    commit_file(target, workbook_path, "Clean formula baseline")
+    save_workbook(hardcoded=True)
+    workbook_result = commit_file(target, workbook_path, "Simulated AI hardcode edit")
+    overrides = workbook_result["diff"]["hardcode_overrides"]
+    for override in overrides:
+        console.print(
+            f"[bold yellow]HARDCODE OVERRIDE[/bold yellow] at "
+            f"{override['location']}: {override['old_formula']} -> "
+            f"{override['new_hardcoded_val']}"
+        )
+
+    presentation = Presentation()
+    presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1))
+    shape.name = "ARR"
+    shape.text_frame.text = "ARR $412,000"
+    deck_path = target / "Board_Deck.pptx"
+    presentation.save(deck_path)
+    deck_result = commit_file(target, deck_path, "Board deck ARR figure")
+    for violation in deck_result["record"]["rule_violations"]:
+        console.print(
+            f"[bold red]RULE VIOLATION[/bold red] "
+            f"{violation['description']}: expected {violation['expected']}, "
+            f"actual {violation['actual']}"
+        )
+
+    report_result = generate_report(target, "Q4_Forecast.xlsx")
+    console.print(
+        Panel.fit(
+            f"[bold green]Demo workspace ready[/bold green] at [cyan]{target}[/cyan]\n"
+            f"Inspect the receipt: [bold]{target / report_result['path']}[/bold]\n"
+            f"Inspect the audit trail: [bold]{target / ATTESTORY_DIR / 'changelog.md'}[/bold]",
+            title="Attestory Demo",
+        )
+    )
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind to."),
+    port: int = typer.Option(8765, "--port", help="Port to listen on."),
+):
+    """Start the local FastAPI bridge for ChatGPT Actions and integrations."""
+    try:
+        import uvicorn
+
+        from attestory.server import create_app
+    except ImportError as error:
+        console.print(
+            '[yellow]Install server extras with: pip install "attestory[server]"[/yellow]'
+        )
+        raise typer.Exit(1) from error
+    uvicorn.run(create_app(Path.cwd()), host=host, port=port)
 
 
 if __name__ == "__main__":

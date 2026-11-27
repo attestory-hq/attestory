@@ -1,59 +1,113 @@
 openapi: 3.1.0
 info:
-  title: Attestory Local Audit Actions
-  version: 0.2.0
+  title: Attestory Local Audit API
+  version: 0.3.0
   description: >
-    Action contract for an HTTPS bridge that invokes Attestory against a
-    configured local workspace. The bridge must keep files and snapshots local.
+    Local-first audit bridge for .xlsx, .pptx, .html, and .csv files. Keep the
+    bridge on localhost or place it behind an independently secured HTTPS
+    adapter before connecting a remote Action.
 servers:
-  - url: https://your-attestory-action-bridge.example.com
-    description: Replace with the HTTPS URL of your secured local bridge.
+  - url: http://127.0.0.1:8765
+    description: Default local Attestory bridge.
 paths:
-  /commit:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Check bridge availability and Attestory version
+      responses:
+        "200":
+          description: Bridge is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  version:
+                    type: string
+                    const: 0.3.0
+  /v1/context:
+    get:
+      operationId: getContext
+      summary: Read workspace rules and recent audit history
+      responses:
+        "200":
+          description: Current governance context
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules_yaml, recent_changelog]
+                properties:
+                  rules_yaml:
+                    type: string
+                  recent_changelog:
+                    type: string
+        "404":
+          description: No initialized Attestory workspace
+  /v1/commit:
     post:
       operationId: commitFile
-      summary: Audit and snapshot an Excel workbook or PowerPoint presentation
+      summary: Audit and snapshot a supported local file or upload
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [file]
+              required: [file_path]
               properties:
-                file:
+                file_path:
                   type: string
-                  description: Workspace-relative .xlsx or .pptx file path
+                  description: Path inside the configured workspace.
                 message:
                   type: string
-                  description: Optional audit commit note
+                  description: Optional audit commit note.
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file_path:
+                  type: string
+                  description: Existing workspace path, alternatively provide a file.
+                file:
+                  type: string
+                  format: binary
+                message:
+                  type: string
       responses:
         "200":
-          description: Snapshot and rule evaluation completed
+          description: Structured commit receipt
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Receipt"
         "400":
           description: Unsupported file or invalid request
-  /diff:
+        "404":
+          description: Workspace file or history not found
+  /v1/diff/{filename}:
     get:
       operationId: diffFile
       summary: Compare the two latest snapshots of a tracked file
       parameters:
-        - in: query
-          name: file
+        - in: path
+          name: filename
           required: true
           schema:
             type: string
-          description: Workspace-relative .xlsx or .pptx file path
+          description: Tracked filename including its extension.
       responses:
         "200":
-          description: Semantic snapshot diff
+          description: Latest semantic snapshot diff
           content:
             application/json:
               schema:
                 type: object
+                required: [file, from_version, to_version, total_changes]
                 properties:
                   file:
                     type: string
@@ -68,23 +122,20 @@ paths:
                     items:
                       type: object
                       additionalProperties: true
+                additionalProperties: true
         "404":
-          description: File has no sufficient commit history
-  /report:
+          description: File has fewer than two commits
+  /v1/report/{filename}:
     post:
       operationId: createReport
       summary: Generate the standalone HTML audit receipt for the latest snapshot
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [file]
-              properties:
-                file:
-                  type: string
-                  description: Workspace-relative .xlsx or .pptx file path
+      parameters:
+        - in: path
+          name: filename
+          required: true
+          schema:
+            type: string
+          description: Tracked filename including its extension.
       responses:
         "200":
           description: Receipt HTML generated locally
@@ -92,24 +143,30 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [file, status]
+                required: [path, status, summary]
                 properties:
-                  file:
+                  path:
                     type: string
-                    description: Workspace-relative path to the generated HTML report
+                    description: Workspace-relative path to the generated HTML report.
                   status:
                     type: string
                     enum: [VERIFIED, NEEDS REVIEW]
-                  html:
-                    type: string
-                    description: Optional self-contained HTML document
+                  summary:
+                    type: object
+                    additionalProperties: true
         "404":
           description: File has no committed snapshot
 components:
   schemas:
     Receipt:
       type: object
-      required: [file, version, sha256, rule_violations]
+      required:
+        - file
+        - version
+        - sha256
+        - diff_summary
+        - hardcode_overrides
+        - rule_violations
       properties:
         file:
           type: string
@@ -117,13 +174,14 @@ components:
           type: integer
         sha256:
           type: string
-        timestamp:
-          type: string
-          format: date-time
-        message:
-          type: string
-        total_changes:
-          type: integer
+        diff_summary:
+          type: object
+          additionalProperties: true
+        hardcode_overrides:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
         rule_violations:
           type: array
           items:
