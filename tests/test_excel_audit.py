@@ -1,4 +1,8 @@
+import shutil
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import openpyxl
 from typer.testing import CliRunner
@@ -31,6 +35,27 @@ def _build_sample_workbook(
     wb.save(path)
 
 
+def _set_cached_formula_value(path: Path, value: int) -> None:
+    temp_path = path.with_suffix(".tmp.xlsx")
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for item in source.infolist():
+            contents = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                root = ET.fromstring(contents)
+                cell = root.find(f".//{namespace}c[@r='B4']")
+                cached_value = cell.find(f"{namespace}v")
+                if cached_value is None:
+                    cached_value = ET.SubElement(cell, f"{namespace}v")
+                cached_value.text = str(value)
+                contents = ET.tostring(root, encoding="utf-8")
+            target.writestr(item, contents)
+    temp_path.replace(path)
+
+
 def test_hardcoded_formula_override_detected(tmp_path: Path):
     init_workspace(tmp_path)
     xlsx_path = tmp_path / "Q4_Forecast.xlsx"
@@ -51,6 +76,91 @@ def test_hardcoded_formula_override_detected(tmp_path: Path):
     assert override["location"] == "Revenue!B4"
     assert override["old_formula"] == "=SUM(B2:B3)"
     assert override["new_hardcoded_val"] == "428000"
+
+
+def test_uncached_formula_is_flagged_in_commit_and_html_receipt(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init"])
+    workbook = tmp_path / "Model.xlsx"
+    _build_sample_workbook(workbook)
+
+    result = runner.invoke(app, ["commit", "Model.xlsx"])
+
+    assert result.exit_code == 0
+    assert "UNCACHED FORMULA CACHE" in result.stdout
+    record = __import__("json").loads(
+        (tmp_path / ".attestory" / "history.json").read_text(encoding="utf-8")
+    )["commits"][0]
+    assert record["stats"]["formula_cache_warnings"] == [
+        {
+            "location": "Revenue!B4",
+            "formula": "=SUM(B2:B3)",
+            "warning": "uncached",
+        }
+    ]
+
+    report = runner.invoke(app, ["report", "Model.xlsx"])
+
+    assert report.exit_code == 0
+    html = (tmp_path / ".attestory" / "reports" / "Model_v1_receipt.html").read_text(
+        encoding="utf-8"
+    )
+    assert "NEEDS REVIEW" in html
+    assert "UNCACHED FORMULA CACHE" in html
+
+
+def test_recalculate_detects_stale_cached_formula_values(tmp_path: Path, monkeypatch):
+    workbook = tmp_path / "Model.xlsx"
+    _build_sample_workbook(workbook)
+    _set_cached_formula_value(workbook, 410000)
+    init_workspace(tmp_path)
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "assertions:\n  - location: Revenue!B4\n    equals: 412000\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("attestory.parsers.excel.shutil.which", lambda _: "soffice")
+
+    def fake_soffice(command, **_kwargs):
+        source = Path(command[-1])
+        output_dir = Path(command[command.index("--outdir") + 1])
+        output = output_dir / source.name
+        shutil.copy2(source, output)
+        _set_cached_formula_value(output, 412000)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("attestory.parsers.excel.subprocess.run", fake_soffice)
+
+    result = commit_file(tmp_path, workbook, recalculate=True)
+
+    assert result["record"]["rule_violations"] == []
+    assert result["record"]["stats"]["formula_cache_warnings"] == [
+        {
+            "location": "Revenue!B4",
+            "formula": "=SUM(B2:B3)",
+            "warning": "stale",
+            "previous_value": 410000,
+            "recalculated_value": 412000,
+        }
+    ]
+    assert (
+        openpyxl.load_workbook(workbook, data_only=True)["Revenue"]["B4"].value
+        == 412000
+    )
+
+
+def test_recalculate_requires_libreoffice(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init"])
+    workbook = tmp_path / "Model.xlsx"
+    _build_sample_workbook(workbook)
+    monkeypatch.setattr("attestory.parsers.excel.shutil.which", lambda _: None)
+
+    result = runner.invoke(app, ["commit", "Model.xlsx", "--recalculate"])
+
+    assert result.exit_code == 1
+    assert "LibreOffice (soffice) is required" in result.stdout
 
 
 def test_cli_end_to_end(tmp_path: Path, monkeypatch):
