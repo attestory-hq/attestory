@@ -1,4 +1,5 @@
 import json
+import sys
 from enum import Enum
 from html import escape
 from importlib.resources import files
@@ -9,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from attestory.api import AuditResult, verify
 from attestory.engine import (
     ATTESTORY_DIR,
     commit_file,
@@ -16,6 +18,7 @@ from attestory.engine import (
     init_workspace,
     workspace_status,
 )
+from attestory.hooks import register_post_tool_use_hook
 
 app = typer.Typer(
     help="Attestory — Local version control & deterministic math auditing for analytics."
@@ -31,41 +34,12 @@ def machine_output(
     summary_stats: dict | None = None,
 ) -> dict:
     """Build the stable JSON shape shared by machine-readable commands."""
-    hardcodes = hardcoded_regressions or []
-    formula_errors = formula_errors or []
-    violations = rule_violations or []
-    return {
-        "passed": not (hardcodes or formula_errors or violations),
-        "hardcoded_regressions": [
-            {
-                "cell": item["location"],
-                "old_formula": item["old_formula"],
-                "new_hardcoded_value": item["new_hardcoded_val"],
-            }
-            for item in hardcodes
-        ],
-        "formula_errors": [
-            {
-                "cell": item["location"],
-                "error_type": item["error"],
-                "formula": item.get("formula", ""),
-            }
-            for item in formula_errors
-        ],
-        "rule_violations": [
-            {
-                "rule_id": item["rule"],
-                "location": item["location"],
-                "expected": item.get("expected", ""),
-                "actual": item.get("actual", ""),
-                "remediation_hint": item.get("description")
-                or item.get("remediation_hint")
-                or "",
-            }
-            for item in violations
-        ],
-        "summary_stats": summary_stats or {},
-    }
+    return AuditResult.from_findings(
+        hardcoded_regressions=hardcoded_regressions,
+        formula_errors=formula_errors,
+        rule_violations=rule_violations,
+        summary_stats=summary_stats,
+    ).to_dict()
 
 
 def print_machine_output(output: dict) -> None:
@@ -102,9 +76,20 @@ def install_skill(
     force: bool = typer.Option(
         False, "--force", "-f", help="Overwrite an existing skill file."
     ),
+    hook: bool = typer.Option(
+        False,
+        "--hook",
+        "--register-hook",
+        help="Register the Claude Code PostToolUse audit hook.",
+    ),
 ):
     """Install the Attestory skill into the current workspace."""
     root = Path.cwd()
+    if hook and target == SkillTarget.COWORK:
+        raise typer.BadParameter(
+            "--hook requires --target claude-code or --target all."
+        )
+
     destinations = {
         SkillTarget.COWORK: [root / "SKILL.md"],
         SkillTarget.CLAUDE_CODE: [
@@ -116,31 +101,43 @@ def install_skill(
         ],
     }[target]
 
-    if not force and any(destination.exists() for destination in destinations):
+    skill_already_exists = not force and any(
+        destination.exists() for destination in destinations
+    )
+    installed_paths = []
+    if skill_already_exists:
         console.print(
             "[yellow]SKILL.md already exists. Use --force to overwrite.[/yellow]"
         )
-        raise typer.Exit(0)
-
-    skill_text = files("attestory.templates").joinpath("SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    for destination in destinations:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(skill_text, encoding="utf-8")
-
-    installed_paths = "\n".join(
-        f"[cyan]{destination.relative_to(root)}[/cyan]"
-        for destination in destinations
-    )
-    console.print(
-        Panel.fit(
-            f"[bold green]Attestory skill installed[/bold green]\n"
-            f"{installed_paths}\n\n"
-            "Verify with: [bold]attestory commit <file.xlsx>[/bold]",
-            title="Attestory",
+    else:
+        skill_text = (
+            files("attestory.templates")
+            .joinpath("SKILL.md")
+            .read_text(encoding="utf-8")
         )
-    )
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(skill_text, encoding="utf-8")
+            installed_paths.append(str(destination.relative_to(root)))
+
+    hook_installed = False
+    if hook:
+        hook_installed = register_post_tool_use_hook(root)
+
+    if installed_paths or hook:
+        message = "[bold green]Attestory skill installed[/bold green]"
+        if installed_paths:
+            message += "\n" + "\n".join(
+                f"[cyan]{path}[/cyan]" for path in installed_paths
+            )
+        if hook:
+            message += (
+                "\n[bold green]Claude Code PostToolUse hook "
+                + ("registered" if hook_installed else "already registered")
+                + "[/bold green]"
+            )
+        message += "\n\nVerify with: [bold]attestory commit <file.xlsx>[/bold]"
+        console.print(Panel.fit(message, title="Attestory"))
 
 
 @app.command()
@@ -154,7 +151,11 @@ def status(
     if json_output:
         root = Path.cwd()
         manifest = root / ATTESTORY_DIR / "history.json"
-        commits = json.loads(manifest.read_text(encoding="utf-8"))["commits"] if manifest.exists() else []
+        commits = (
+            json.loads(manifest.read_text(encoding="utf-8"))["commits"]
+            if manifest.exists()
+            else []
+        )
         latest_by_file = {}
         previous_by_file = {}
         for commit in commits:
@@ -219,6 +220,35 @@ def status(
     Console(width=140).print(table)
 
 
+@app.command("hook-post-tool-use")
+def hook_post_tool_use():
+    """Audit supported files reported by a Claude Code PostToolUse event."""
+    event = json.load(sys.stdin)
+    if not isinstance(event, dict):
+        raise typer.BadParameter("Hook input must be a JSON object.")
+    tool_input = event.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        raise typer.BadParameter("Hook input 'tool_input' must be an object.")
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return
+    target = Path(file_path)
+    if target.suffix.lower() not in {".xlsx", ".pptx", ".csv"}:
+        return
+
+    root_value = event.get("cwd", str(Path.cwd()))
+    if not isinstance(root_value, str) or not root_value:
+        raise typer.BadParameter("Hook input 'cwd' must be a non-empty path.")
+    root = Path(root_value).expanduser().resolve()
+    if not target.is_absolute():
+        target = root / target
+
+    result = verify(target, message="Claude Code PostToolUse hook", root=root)
+    print_machine_output(result.to_dict())
+    if not result.passed:
+        raise typer.Exit(1)
+
+
 @app.command()
 def commit(
     file: Path = typer.Argument(
@@ -249,8 +279,12 @@ def commit(
             summary_stats={
                 "total_changes": diff["total_changes"] if diff else 0,
                 "hardcode_overrides": len(hardcodes),
-                "formula_changes": len(diff["formula_changes"]) if diff and "formula_changes" in diff else 0,
-                "value_changes": len(diff["value_changes"]) if diff and "value_changes" in diff else 0,
+                "formula_changes": len(diff["formula_changes"])
+                if diff and "formula_changes" in diff
+                else 0,
+                "value_changes": len(diff["value_changes"])
+                if diff and "value_changes" in diff
+                else 0,
                 "rule_violations": len(violations),
             },
         )
@@ -363,9 +397,7 @@ def diff(
     if not manifest.exists():
         if json_output:
             print_machine_output(
-                machine_output(
-                    summary_stats={"total_changes": 0, "rule_violations": 0}
-                )
+                machine_output(summary_stats={"total_changes": 0, "rule_violations": 0})
             )
             raise typer.Exit(1)
         console.print(
@@ -378,9 +410,7 @@ def diff(
     if len(commits) < 2:
         if json_output:
             print_machine_output(
-                machine_output(
-                    summary_stats={"total_changes": 0, "rule_violations": 0}
-                )
+                machine_output(summary_stats={"total_changes": 0, "rule_violations": 0})
             )
             raise typer.Exit(0)
         console.print(
@@ -409,8 +439,12 @@ def diff(
             summary_stats={
                 "total_changes": res["total_changes"],
                 "hardcode_overrides": len(hardcodes),
-                "formula_changes": len(res["formula_changes"]) if "formula_changes" in res else 0,
-                "value_changes": len(res["value_changes"]) if "value_changes" in res else 0,
+                "formula_changes": len(res["formula_changes"])
+                if "formula_changes" in res
+                else 0,
+                "value_changes": len(res["value_changes"])
+                if "value_changes" in res
+                else 0,
                 "rule_violations": len(violations),
             },
         )
@@ -635,15 +669,15 @@ def report(
         result = generate_report(Path.cwd(), file.name)
     except FileNotFoundError as error:
         if json_output:
-            print_machine_output(
-                machine_output(summary_stats={"rule_violations": 0})
-            )
+            print_machine_output(machine_output(summary_stats={"rule_violations": 0}))
             raise typer.Exit(1) from error
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
     if json_output:
         root = Path.cwd()
-        history = json.loads((root / ATTESTORY_DIR / "history.json").read_text(encoding="utf-8"))
+        history = json.loads(
+            (root / ATTESTORY_DIR / "history.json").read_text(encoding="utf-8")
+        )
         latest = next(
             commit
             for commit in reversed(history["commits"])

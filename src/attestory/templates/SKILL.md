@@ -12,6 +12,7 @@ Whenever you work in a folder containing `.xlsx`, `.pptx`, `.html`, or `.csv` de
 4. **Inspect changes:** Run `attestory diff <filename>` to review the latest semantic changes.
 5. **Share an audit receipt:** Run `attestory report <filename>` to generate a standalone HTML receipt in `.attestory/reports/`.
 6. **Self-Correction Gate:** Inspect the `Attestory Receipt` output. If any `HARDCODE OVERRIDE`, rule violation, or Excel error (`#REF!`, `#DIV/0!`, `#VALUE!`) is flagged unintentionally, fix the source file immediately and re-run `attestory commit` before presenting the result.
+7. **Agent Output:** Use `attestory commit <filename> --json` when parsing audit results programmatically. A non-zero exit code means the JSON diagnostics contain a hardcode regression, formula error, or rule violation.
 
 ChatGPT users can follow these same CLI commands in a local terminal. Run
 `attestory serve --host 127.0.0.1 --port 8765` to start the optional local
