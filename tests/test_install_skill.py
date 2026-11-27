@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from attestory.cli import app
@@ -106,8 +107,9 @@ def test_install_skill_rejects_hook_for_cowork_only(tmp_path: Path, monkeypatch)
     result = runner.invoke(app, ["install-skill", "--hook"])
 
     assert result.exit_code != 0
-    assert "claude-code or" in result.output
-    assert "target all." in result.output
+    assert "--hook requires --target claude-code or --target all" in strip_ansi(
+        result.output
+    )
 
 
 def test_post_tool_use_hook_audits_supported_files_only(tmp_path: Path, monkeypatch):
