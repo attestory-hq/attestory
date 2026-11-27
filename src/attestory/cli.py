@@ -46,6 +46,10 @@ def print_machine_output(output: dict) -> None:
     typer.echo(json.dumps(output, sort_keys=True, separators=(",", ":")))
 
 
+def formula_cache_warnings(stats: dict) -> list[dict]:
+    return stats.get("formula_cache_warnings", [])
+
+
 class SkillTarget(str, Enum):
     COWORK = "cowork"
     CLAUDE_CODE = "claude-code"
@@ -260,9 +264,20 @@ def commit(
     json_output: bool = typer.Option(
         False, "--json", help="Output strict machine-readable JSON."
     ),
+    recalculate: bool = typer.Option(
+        False,
+        "--recalculate",
+        help="Recalculate an .xlsx workbook with LibreOffice before auditing.",
+    ),
 ):
     """Audit and snapshot a supported local file."""
-    result = commit_file(Path.cwd(), file.resolve(), message=message)
+    try:
+        result = commit_file(
+            Path.cwd(), file.resolve(), message=message, recalculate=recalculate
+        )
+    except RuntimeError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
     rec = result["record"]
     diff = result["diff"]
 
@@ -279,6 +294,7 @@ def commit(
             summary_stats={
                 "total_changes": diff["total_changes"] if diff else 0,
                 "hardcode_overrides": len(hardcodes),
+                "formula_cache_warnings": len(formula_cache_warnings(rec["stats"])),
                 "formula_changes": len(diff["formula_changes"])
                 if diff and "formula_changes" in diff
                 else 0,
@@ -298,7 +314,11 @@ def commit(
         rec["rule_violations"]
         or (
             file.suffix.lower() == ".xlsx"
-            and (rec["stats"]["errors"] or (diff and diff.get("hardcode_overrides")))
+            and (
+                rec["stats"]["errors"]
+                or formula_cache_warnings(rec["stats"])
+                or (diff and diff.get("hardcode_overrides"))
+            )
         )
         or (file.suffix.lower() == ".html" and rec["stats"]["external_references"])
     ):
@@ -312,8 +332,15 @@ def commit(
     if extension == ".xlsx":
         summary_lines.append(
             f"[bold]Populated Cells:[/bold] {rec['stats']['populated_cells']}  |  "
-            f"[bold]Formula Errors:[/bold] {len(rec['stats']['errors'])}"
+            f"[bold]Formula Errors:[/bold] {len(rec['stats']['errors'])}  |  "
+            f"[bold]Uncached/Stale Formulas:[/bold] "
+            f"{len(formula_cache_warnings(rec['stats']))}"
         )
+        for warning in formula_cache_warnings(rec["stats"]):
+            console.print(
+                f"[yellow]⚠️ {warning['warning'].upper()} FORMULA CACHE[/yellow] "
+                f"at {warning['location']}: {warning['formula']}"
+            )
     elif extension == ".pptx":
         summary_lines.append(
             f"[bold]Slides:[/bold] {rec['stats']['slides']}  |  "
@@ -520,6 +547,7 @@ def generate_report(root: Path, filename: str) -> dict:
     violations = latest.get("rule_violations", [])
     review_needed = bool(
         latest.get("stats", {}).get("errors")
+        or formula_cache_warnings(latest.get("stats", {}))
         or hardcodes
         or violations
         or latest.get("stats", {}).get("external_references")
@@ -605,6 +633,12 @@ def generate_report(root: Path, filename: str) -> dict:
         f"{escape(str(item.get('description') or item.get('expected', 'Assertion failed')))}</li>"
         for item in violations
     )
+    formula_cache_html = "".join(
+        f"<li><strong>{escape(item['warning'].upper())} FORMULA CACHE</strong> — "
+        f"{escape(item['location'])}: {escape(item['formula'])}. "
+        "Recalculate the workbook in Excel/LibreOffice.</li>"
+        for item in formula_cache_warnings(latest.get("stats", {}))
+    )
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Attestory Receipt — {escape(latest["file"])} v{latest["version"]}</title>
@@ -628,8 +662,10 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
 <div class="card"><span>Hardcode Overrides</span><strong>{hardcodes}</strong></div>
 <div class="card"><span>Formula Edits</span><strong>{formulas}</strong></div>
 <div class="card"><span>Rule Violations</span><strong>{len(violations)}</strong></div>
+<div class="card"><span>Formula Cache Warnings</span><strong>{len(formula_cache_warnings(latest.get("stats", {})))}</strong></div>
 <div class="card"><span>External References</span><strong>{latest.get("stats", {}).get("external_references", 0)}</strong></div></section>
 {"<section class='card violations'><strong>Rule violations</strong><ul>" + violation_html + "</ul></section>" if violations else ""}
+{"<section class='card violations'><strong>Formula cache warnings</strong><ul>" + formula_cache_html + "</ul></section>" if formula_cache_html else ""}
 <section class="diff"><table><thead><tr><th>Element</th><th>Previous</th><th>Current</th><th>Numeric delta</th><th>Change type</th></tr></thead>
 <tbody>{row_html}</tbody></table></section>
 </main></body></html>"""
@@ -648,6 +684,9 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
             "hardcode_overrides": hardcodes,
             "formula_changes": formulas,
             "rule_violations": len(violations),
+            "formula_cache_warnings": len(
+                formula_cache_warnings(latest.get("stats", {}))
+            ),
             "external_references": latest.get("stats", {}).get(
                 "external_references", 0
             ),

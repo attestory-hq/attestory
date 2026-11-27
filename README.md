@@ -56,6 +56,9 @@ attestory commit Q4_Forecast.xlsx -m "Initial baseline"
 # 3. After editing in Excel, Claude Cowork, or ChatGPT, commit again to catch silent regressions
 attestory commit Q4_Forecast.xlsx -m "Updated November actuals"
 
+# Optionally recalculate formulas with LibreOffice before auditing
+attestory commit Q4_Forecast.xlsx --recalculate
+
 # 4. Inspect cell-level formula & value diffs
 attestory diff Q4_Forecast.xlsx
 
@@ -145,6 +148,13 @@ metrics, HTML KPIs, or CSV summary statistics. Existing `pptx_file` /
 with selectors such as `metric_a: {column_name: Revenue, label: SUM}` and
 `metric_b: {location: Revenue!B4}`. Rule violations appear in the terminal
 receipt, commit history, and changelog.
+
+Excel formula cells without cached results are flagged in the commit output and
+HTML receipt; their values cannot be used reliably in numeric assertions.
+`attestory commit <file.xlsx> --recalculate` optionally recalculates the workbook
+with LibreOffice before snapshotting and evaluating assertions. LibreOffice must
+be installed, and recalculation updates the workbook file. When recalculation
+changes a formula's cached result, the receipt identifies it as stale.
 
 HTML snapshots parse KPI/metric elements and table cells and flag externally
 hosted scripts or tracking images for review. CSV snapshots track dataset row

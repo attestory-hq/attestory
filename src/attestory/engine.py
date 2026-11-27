@@ -10,7 +10,7 @@ from attestory.parsers.csv_extract import (
     diff_csv_snapshots,
     extract_csv_to_parquet,
 )
-from attestory.parsers.excel import extract_xlsx_to_parquet
+from attestory.parsers.excel import extract_xlsx_to_parquet, recalculate_xlsx
 from attestory.parsers.html import diff_html_snapshots, extract_html_to_parquet
 from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
 from attestory.rules import evaluate_rules
@@ -139,7 +139,9 @@ def diff_file_snapshots(prev_pq: Path, curr_pq: Path, file_name: str) -> dict:
     raise ValueError(f"Unsupported file type: {file_name}")
 
 
-def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
+def commit_file(
+    root: Path, target_file: Path, message: str = "", *, recalculate: bool = False
+) -> dict:
     """Create a new Parquet snapshot for target_file, diff against prior version, and append to changelog.md."""
     meta_dir = root / ATTESTORY_DIR
     if not meta_dir.exists():
@@ -148,6 +150,10 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
     extension = target_file.suffix.lower()
     if extension not in {".xlsx", ".pptx", ".html", ".csv"}:
         raise ValueError("Attestory supports .xlsx, .pptx, .html, and .csv files.")
+    if recalculate and extension != ".xlsx":
+        raise ValueError("--recalculate is only supported for .xlsx workbooks.")
+
+    recalculation_warnings = recalculate_xlsx(target_file) if recalculate else []
 
     manifest_path = meta_dir / "history.json"
     history = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -164,6 +170,15 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
         ".csv": extract_csv_to_parquet,
     }
     stats = extractors[extension](target_file, curr_pq)
+    if recalculation_warnings:
+        warnings_by_location = {
+            warning["location"]: warning
+            for warning in stats.get("formula_cache_warnings", [])
+        }
+        warnings_by_location.update(
+            {warning["location"]: warning for warning in recalculation_warnings}
+        )
+        stats["formula_cache_warnings"] = list(warnings_by_location.values())
     file_hash = sha256_file(target_file)
 
     diff_report = None
@@ -202,6 +217,11 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
         lines.append(
             f"- **Cells:** {stats['populated_cells']} | **Excel Errors:** {len(stats['errors'])}"
         )
+        for warning in stats.get("formula_cache_warnings", []):
+            lines.append(
+                f"- ⚠️ **{warning['warning'].upper()} FORMULA CACHE** at "
+                f"`{warning['location']}`: `{warning['formula']}`"
+            )
     elif extension == ".pptx":
         lines.append(
             f"- **Slides:** {stats['slides']} | **Elements:** {stats['elements']}"
