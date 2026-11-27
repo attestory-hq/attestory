@@ -23,6 +23,55 @@ app = typer.Typer(
 console = Console()
 
 
+def machine_output(
+    *,
+    hardcoded_regressions: list[dict] | None = None,
+    formula_errors: list[dict] | None = None,
+    rule_violations: list[dict] | None = None,
+    summary_stats: dict | None = None,
+) -> dict:
+    """Build the stable JSON shape shared by machine-readable commands."""
+    hardcodes = hardcoded_regressions or []
+    formula_errors = formula_errors or []
+    violations = rule_violations or []
+    return {
+        "passed": not (hardcodes or formula_errors or violations),
+        "hardcoded_regressions": [
+            {
+                "cell": item["location"],
+                "old_formula": item["old_formula"],
+                "new_hardcoded_value": item["new_hardcoded_val"],
+            }
+            for item in hardcodes
+        ],
+        "formula_errors": [
+            {
+                "cell": item["location"],
+                "error_type": item["error"],
+                "formula": item.get("formula", ""),
+            }
+            for item in formula_errors
+        ],
+        "rule_violations": [
+            {
+                "rule_id": item["rule"],
+                "location": item["location"],
+                "expected": item.get("expected", ""),
+                "actual": item.get("actual", ""),
+                "remediation_hint": item.get("description")
+                or item.get("remediation_hint")
+                or "",
+            }
+            for item in violations
+        ],
+        "summary_stats": summary_stats or {},
+    }
+
+
+def print_machine_output(output: dict) -> None:
+    typer.echo(json.dumps(output, sort_keys=True, separators=(",", ":")))
+
+
 class SkillTarget(str, Enum):
     COWORK = "cowork"
     CLAUDE_CODE = "claude-code"
@@ -95,9 +144,54 @@ def install_skill(
 
 
 @app.command()
-def status():
+def status(
+    json_output: bool = typer.Option(
+        False, "--json", help="Output strict machine-readable JSON."
+    ),
+):
     """Show the latest audit status for every tracked file."""
     entries = workspace_status(Path.cwd())
+    if json_output:
+        root = Path.cwd()
+        manifest = root / ATTESTORY_DIR / "history.json"
+        commits = json.loads(manifest.read_text(encoding="utf-8"))["commits"] if manifest.exists() else []
+        latest_by_file = {}
+        previous_by_file = {}
+        for commit in commits:
+            if commit["file"] in latest_by_file:
+                previous_by_file[commit["file"]] = latest_by_file[commit["file"]]
+            latest_by_file[commit["file"]] = commit
+        formula_errors = []
+        violations = []
+        hardcodes = []
+        for commit in latest_by_file.values():
+            formula_errors.extend(commit.get("stats", {}).get("errors", []))
+            violations.extend(commit.get("rule_violations", []))
+            previous = previous_by_file.get(commit["file"])
+            if previous:
+                diff = diff_file_snapshots(
+                    root / previous["snapshot"],
+                    root / commit["snapshot"],
+                    commit["file"],
+                )
+                hardcodes.extend(diff.get("hardcode_overrides", []))
+        output = machine_output(
+            hardcoded_regressions=hardcodes,
+            formula_errors=formula_errors,
+            rule_violations=violations,
+            summary_stats={
+                "tracked_files": len(latest_by_file),
+                "open_issues": sum(
+                    len(commit.get("rule_violations", []))
+                    + len(commit.get("stats", {}).get("errors", []))
+                    for commit in latest_by_file.values()
+                ),
+            },
+        )
+        print_machine_output(output)
+        if not output["passed"]:
+            raise typer.Exit(1)
+        return
     if not entries:
         console.print(
             "[yellow]No tracked files yet. Run 'attestory demo' or "
@@ -133,11 +227,37 @@ def commit(
     message: str = typer.Option(
         "", "-m", "--message", help="Optional note describing this update."
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output strict machine-readable JSON."
+    ),
 ):
     """Audit and snapshot a supported local file."""
     result = commit_file(Path.cwd(), file.resolve(), message=message)
     rec = result["record"]
     diff = result["diff"]
+
+    if json_output:
+        hardcodes = diff.get("hardcode_overrides", []) if diff else []
+        formula_errors = (
+            rec["stats"].get("errors", []) if file.suffix.lower() == ".xlsx" else []
+        )
+        violations = rec["rule_violations"]
+        output = machine_output(
+            hardcoded_regressions=hardcodes,
+            formula_errors=formula_errors,
+            rule_violations=violations,
+            summary_stats={
+                "total_changes": diff["total_changes"] if diff else 0,
+                "hardcode_overrides": len(hardcodes),
+                "formula_changes": len(diff["formula_changes"]) if diff and "formula_changes" in diff else 0,
+                "value_changes": len(diff["value_changes"]) if diff and "value_changes" in diff else 0,
+                "rule_violations": len(violations),
+            },
+        )
+        print_machine_output(output)
+        if not output["passed"]:
+            raise typer.Exit(1)
+        return
 
     status_color = "green"
     if (
@@ -233,11 +353,21 @@ def diff(
     file: Path = typer.Argument(
         ..., help="Filename (.xlsx, .pptx, .html, or .csv) to compare snapshots."
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output strict machine-readable JSON."
+    ),
 ):
     """Compare the latest two Parquet snapshots of a tracked file."""
     root = Path.cwd()
     manifest = root / ATTESTORY_DIR / "history.json"
     if not manifest.exists():
+        if json_output:
+            print_machine_output(
+                machine_output(
+                    summary_stats={"total_changes": 0, "rule_violations": 0}
+                )
+            )
+            raise typer.Exit(1)
         console.print(
             "[red]No .attestory/ history found. Run `attestory init` first.[/red]"
         )
@@ -246,6 +376,13 @@ def diff(
     history = json.loads(manifest.read_text(encoding="utf-8"))
     commits = [c for c in history["commits"] if c["file"] == file.name]
     if len(commits) < 2:
+        if json_output:
+            print_machine_output(
+                machine_output(
+                    summary_stats={"total_changes": 0, "rule_violations": 0}
+                )
+            )
+            raise typer.Exit(0)
         console.print(
             f"[yellow]Need at least 2 versions of {file.name} to diff.[/yellow]"
         )
@@ -256,6 +393,31 @@ def diff(
         root / commits[-1]["snapshot"],
         file.name,
     )
+    if json_output:
+        latest = commits[-1]
+        violations = latest.get("rule_violations", [])
+        formula_errors = (
+            latest.get("stats", {}).get("errors", [])
+            if file.suffix.lower() == ".xlsx"
+            else []
+        )
+        hardcodes = res.get("hardcode_overrides", [])
+        output = machine_output(
+            hardcoded_regressions=hardcodes,
+            formula_errors=formula_errors,
+            rule_violations=violations,
+            summary_stats={
+                "total_changes": res["total_changes"],
+                "hardcode_overrides": len(hardcodes),
+                "formula_changes": len(res["formula_changes"]) if "formula_changes" in res else 0,
+                "value_changes": len(res["value_changes"]) if "value_changes" in res else 0,
+                "rule_violations": len(violations),
+            },
+        )
+        print_machine_output(output)
+        if not output["passed"]:
+            raise typer.Exit(1)
+        return
     console.print(
         f"[bold]Diff {file.name}: v{commits[-2]['version']} -> v{commits[-1]['version']}[/bold] "
         f"({res['total_changes']} changes)"
@@ -464,13 +626,58 @@ def report(
     file: Path = typer.Argument(
         ..., help="Tracked .xlsx, .pptx, .html, or .csv file to report on."
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output strict machine-readable JSON."
+    ),
 ):
     """Generate a standalone HTML audit receipt for the latest snapshot."""
     try:
         result = generate_report(Path.cwd(), file.name)
     except FileNotFoundError as error:
+        if json_output:
+            print_machine_output(
+                machine_output(summary_stats={"rule_violations": 0})
+            )
+            raise typer.Exit(1) from error
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
+    if json_output:
+        root = Path.cwd()
+        history = json.loads((root / ATTESTORY_DIR / "history.json").read_text(encoding="utf-8"))
+        latest = next(
+            commit
+            for commit in reversed(history["commits"])
+            if commit["file"] == file.name
+        )
+        file_commits = [
+            commit for commit in history["commits"] if commit["file"] == file.name
+        ]
+        violations = latest.get("rule_violations", [])
+        formula_errors = (
+            latest.get("stats", {}).get("errors", [])
+            if file.suffix.lower() == ".xlsx"
+            else []
+        )
+        diff = (
+            diff_file_snapshots(
+                root / file_commits[-2]["snapshot"],
+                root / latest["snapshot"],
+                file.name,
+            )
+            if len(file_commits) >= 2
+            else None
+        )
+        hardcodes = diff.get("hardcode_overrides", []) if diff else []
+        output = machine_output(
+            hardcoded_regressions=hardcodes,
+            formula_errors=formula_errors,
+            rule_violations=violations,
+            summary_stats=result["summary"],
+        )
+        print_machine_output(output)
+        if not output["passed"]:
+            raise typer.Exit(1)
+        return
     console.print(f"[green]HTML audit receipt written to {result['path']}[/green]")
 
 

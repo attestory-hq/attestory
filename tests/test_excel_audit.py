@@ -72,3 +72,45 @@ def test_cli_end_to_end(tmp_path: Path, monkeypatch):
     diff_res = runner.invoke(app, ["diff", "Model.xlsx"])
     assert diff_res.exit_code == 0
     assert "Revenue!B4" in diff_res.stdout
+
+
+def test_commit_json_output_and_failure_exit(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init"])
+    xlsx_path = tmp_path / "Model.xlsx"
+    _build_sample_workbook(xlsx_path)
+    assert runner.invoke(app, ["commit", "Model.xlsx"]).exit_code == 0
+
+    _build_sample_workbook(xlsx_path, overwrite_total_with_hardcode=True)
+    result = runner.invoke(app, ["commit", "Model.xlsx", "--json"])
+
+    assert result.exit_code == 1
+    payload = __import__("json").loads(result.stdout)
+    assert payload["passed"] is False
+    assert payload["hardcoded_regressions"] == [
+        {
+            "cell": "Revenue!B4",
+            "old_formula": "=SUM(B2:B3)",
+            "new_hardcoded_value": "428000",
+        }
+    ]
+    assert payload["formula_errors"] == []
+    assert payload["rule_violations"] == []
+    assert payload["summary_stats"]["hardcode_overrides"] == 1
+
+
+def test_diff_json_output(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init"])
+    xlsx_path = tmp_path / "Model.xlsx"
+    _build_sample_workbook(xlsx_path)
+    runner.invoke(app, ["commit", "Model.xlsx"])
+    _build_sample_workbook(xlsx_path, overwrite_total_with_hardcode=True)
+    runner.invoke(app, ["commit", "Model.xlsx"])
+
+    result = runner.invoke(app, ["diff", "Model.xlsx", "--json"])
+
+    assert result.exit_code == 1
+    payload = __import__("json").loads(result.stdout)
+    assert payload["passed"] is False
+    assert payload["hardcoded_regressions"][0]["cell"] == "Revenue!B4"
