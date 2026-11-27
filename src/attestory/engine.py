@@ -250,3 +250,39 @@ def commit_file(root: Path, target_file: Path, message: str = "") -> dict:
         f.write("\n".join(lines))
 
     return {"record": record, "diff": diff_report}
+
+
+def workspace_status(root: Path) -> list[dict]:
+    """Return a latest-commit overview for each file tracked in this workspace."""
+    manifest_path = root / ATTESTORY_DIR / "history.json"
+    if not manifest_path.exists():
+        return []
+
+    history = json.loads(manifest_path.read_text(encoding="utf-8"))
+    latest_by_file = {}
+    for commit in history.get("commits", []):
+        latest_by_file[commit["file"]] = commit
+
+    status = []
+    for filename, commit in sorted(latest_by_file.items()):
+        stats = commit.get("stats", {})
+        violations = commit.get("rule_violations", [])
+        diff_summary = commit.get("diff_summary", {})
+        errors_and_violations = len(stats.get("errors", [])) + len(violations)
+        needs_review = bool(
+            errors_and_violations
+            or diff_summary.get("hardcode_overrides")
+            or stats.get("external_references")
+        )
+        updated = datetime.fromisoformat(commit["timestamp"]).astimezone(UTC)
+        status.append(
+            {
+                "file": filename,
+                "version": commit["version"],
+                "timestamp": updated.strftime("%Y-%m-%d %H:%M:%S"),
+                "sha256": commit["sha256"],
+                "open_issues": errors_and_violations,
+                "status": "NEEDS REVIEW" if needs_review else "VERIFIED",
+            }
+        )
+    return status
