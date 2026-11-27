@@ -1,5 +1,7 @@
 import json
+from enum import Enum
 from html import escape
+from importlib.resources import files
 from pathlib import Path
 
 import typer
@@ -20,6 +22,12 @@ app = typer.Typer(
 console = Console()
 
 
+class SkillTarget(str, Enum):
+    COWORK = "cowork"
+    CLAUDE_CODE = "claude-code"
+    ALL = "all"
+
+
 @app.command()
 def init():
     """Initialize a local .attestory/ audit folder in the current directory."""
@@ -28,6 +36,58 @@ def init():
         Panel.fit(
             f"[bold green]Initialized Attestory workspace[/bold green] at [cyan]{meta_dir}[/cyan]\n"
             "Created [bold]rules.yaml[/bold], [bold]changelog.md[/bold], and [bold]snapshots/[/bold].",
+            title="Attestory",
+        )
+    )
+
+
+@app.command()
+def install_skill(
+    target: SkillTarget = typer.Option(
+        SkillTarget.COWORK,
+        "--target",
+        "-t",
+        help="Install for Cowork, Claude Code, or both.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Overwrite an existing skill file."
+    ),
+):
+    """Install the Attestory skill into the current workspace."""
+    root = Path.cwd()
+    destinations = {
+        SkillTarget.COWORK: [root / "SKILL.md"],
+        SkillTarget.CLAUDE_CODE: [
+            root / ".claude" / "skills" / "attestory" / "SKILL.md"
+        ],
+        SkillTarget.ALL: [
+            root / "SKILL.md",
+            root / ".claude" / "skills" / "attestory" / "SKILL.md",
+        ],
+    }[target]
+
+    if not force and any(destination.exists() for destination in destinations):
+        console.print(
+            "[yellow]SKILL.md already exists. Use --force to overwrite.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    skill_text = files("attestory.templates").joinpath("SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for destination in destinations:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(skill_text, encoding="utf-8")
+
+    installed_paths = "\n".join(
+        f"[cyan]{destination.relative_to(root)}[/cyan]"
+        for destination in destinations
+    )
+    console.print(
+        Panel.fit(
+            f"[bold green]Attestory skill installed[/bold green]\n"
+            f"{installed_paths}\n\n"
+            "Verify with: [bold]attestory commit <file.xlsx>[/bold]",
             title="Attestory",
         )
     )

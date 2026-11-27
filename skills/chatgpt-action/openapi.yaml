@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Attestory Local Audit API
-  version: 0.3.0
+  version: 0.3.2
   description: >
     Local-first audit bridge for .xlsx, .pptx, .html, and .csv files. Keep the
     bridge on localhost or place it behind an independently secured HTTPS
@@ -28,7 +28,7 @@ paths:
                     const: ok
                   version:
                     type: string
-                    const: 0.3.0
+                    const: 0.3.2
   /v1/context:
     get:
       operationId: getContext

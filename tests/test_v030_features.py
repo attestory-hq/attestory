@@ -197,7 +197,7 @@ def test_fastapi_bridge_endpoints(tmp_path: Path):
 
     health = client.get("/health")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok", "version": "0.3.0"}
+    assert health.json() == {"status": "ok", "version": "0.3.2"}
     context = client.get("/v1/context")
     assert context.status_code == 200
     assert "must_be_formula" in context.json()["rules_yaml"]
