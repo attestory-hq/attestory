@@ -14,6 +14,7 @@ from attestory.engine import (
     commit_file,
     diff_file_snapshots,
     init_workspace,
+    workspace_status,
 )
 
 app = typer.Typer(
@@ -91,6 +92,37 @@ def install_skill(
             title="Attestory",
         )
     )
+
+
+@app.command()
+def status():
+    """Show the latest audit status for every tracked file."""
+    entries = workspace_status(Path.cwd())
+    if not entries:
+        console.print(
+            "[yellow]No tracked files yet. Run 'attestory demo' or "
+            "'attestory commit <file>'[/yellow]"
+        )
+        return
+
+    table = Table(title="Attestory Workspace Status")
+    table.add_column("File")
+    table.add_column("Latest Version")
+    table.add_column("Last Updated (UTC)")
+    table.add_column("SHA-256 Prefix")
+    table.add_column("Open Errors / Rule Violations", justify="right")
+    table.add_column("Status")
+    for entry in entries:
+        status_style = "green" if entry["status"] == "VERIFIED" else "yellow"
+        table.add_row(
+            entry["file"],
+            f"v{entry['version']}",
+            entry["timestamp"],
+            entry["sha256"][:12],
+            str(entry["open_issues"]),
+            f"[{status_style}]{entry['status']}[/{status_style}]",
+        )
+    Console(width=140).print(table)
 
 
 @app.command()
@@ -440,6 +472,48 @@ def report(
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
     console.print(f"[green]HTML audit receipt written to {result['path']}[/green]")
+
+
+@app.command()
+def watch(
+    recursive: bool = typer.Option(
+        False, "--recursive", help="Watch subdirectories recursively."
+    ),
+    debounce: float = typer.Option(
+        2.0, "--debounce", help="Seconds to wait after a save before snapshotting."
+    ),
+):
+    """Automatically snapshot supported files after they are saved."""
+    if debounce <= 0:
+        raise typer.BadParameter("--debounce must be greater than zero.")
+
+    from attestory.watcher import run_watcher
+
+    console.print(
+        f"Watching {Path.cwd()} ({'recursive' if recursive else 'non-recursive'}); "
+        f"debounce {debounce:g}s. Press Ctrl+C to stop."
+    )
+
+    def on_commit(result):
+        record = result["record"]
+        console.print(
+            f"[green]Auto-snapshot[/green] {record['file']} v{record['version']} "
+            f"— SHA-256 {record['sha256'][:12]}"
+        )
+
+    def on_error(path, error):
+        console.print(f"[red]Could not snapshot {path}: {error}[/red]")
+
+    try:
+        run_watcher(
+            Path.cwd(),
+            recursive=recursive,
+            debounce=debounce,
+            on_commit=on_commit,
+            on_error=on_error,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped watching.[/yellow]")
 
 
 @app.command()

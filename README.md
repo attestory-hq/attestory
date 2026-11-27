@@ -1,6 +1,7 @@
 # Attestory
 
 [![CI](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml/badge.svg)](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/attestory.svg)](https://pypi.org/project/attestory/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
@@ -22,16 +23,26 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 
 ---
 
+## Visual Proof
+
+See the [sample HTML receipt](docs/examples/sample_receipt.html) in your browser.
+
+![Attestory terminal receipt](docs/images/terminal-receipt.png)
+
+![Attestory HTML audit receipt](docs/images/html-report.png)
+
 ## Quickstart
 
 ```bash
-pip install -e .
+# Run the interactive demo immediately (zero setup required)
+uvx attestory demo
 
 # Install the Claude Cowork / Claude Code skill into your current workspace
 attestory install-skill
 
-# Try the complete workflow without preparing files
-attestory demo
+# Or install globally with uv / pip
+uv tool install attestory
+# Or: pip install attestory
 
 # 1. Initialize .attestory/ in your working folder
 attestory init
@@ -57,7 +68,16 @@ attestory report Board_Deck.pptx
 attestory commit actuals.csv -m "Approved actuals"
 attestory commit executive_dashboard.html -m "Dashboard baseline"
 attestory diff actuals.csv
+
+# See the latest health of all tracked files
+attestory status
+
+# Automatically snapshot supported files when they are saved (Ctrl+C to stop)
+attestory watch
 ```
+
+Use `attestory watch --recursive` to include subdirectories, or tune its save
+debounce with `attestory watch --debounce 1.0`.
 
 ## Rules and cross-file checks
 

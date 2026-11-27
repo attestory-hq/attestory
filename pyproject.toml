@@ -21,7 +21,13 @@ dependencies = [
     "python-pptx>=1.0.2",
     "beautifulsoup4>=4.12.0",
     "lxml>=5.2.0",
+    "watchdog>=4.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/attestory-hq/attestory"
+Repository = "https://github.com/attestory-hq/attestory"
+Issues = "https://github.com/attestory-hq/attestory/issues"
 
 [project.optional-dependencies]
 server = [
