@@ -1,6 +1,6 @@
 """In-process Python API for snapshotting and verifying supported files."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,9 @@ class AuditResult:
     summary_stats: dict[str, Any]
     record: dict[str, Any]
     diff: dict[str, Any] | None
+    formula_changes: list[dict[str, Any]] = field(default_factory=list)
+    formula_to_blanks: list[dict[str, Any]] = field(default_factory=list)
+    missing_formula_cells: list[dict[str, Any]] = field(default_factory=list)
     status: str = "PASS"
     incomplete_findings: list[dict[str, Any]] | None = None
 
@@ -27,6 +30,9 @@ class AuditResult:
             "passed": self.passed,
             "status": self.status,
             "hardcoded_regressions": self.hardcoded_regressions,
+            "formula_changes": self.formula_changes,
+            "formula_to_blanks": self.formula_to_blanks,
+            "missing_formula_cells": self.missing_formula_cells,
             "formula_errors": self.formula_errors,
             "rule_violations": self.rule_violations,
             "incomplete_findings": self.incomplete_findings or [],
@@ -38,6 +44,9 @@ class AuditResult:
         cls,
         *,
         hardcoded_regressions: list[dict[str, Any]] | None = None,
+        formula_changes: list[dict[str, Any]] | None = None,
+        formula_to_blanks: list[dict[str, Any]] | None = None,
+        missing_formula_cells: list[dict[str, Any]] | None = None,
         formula_errors: list[dict[str, Any]] | None = None,
         rule_violations: list[dict[str, Any]] | None = None,
         incomplete_findings: list[dict[str, Any]] | None = None,
@@ -53,6 +62,9 @@ class AuditResult:
             }
             for item in (hardcoded_regressions or [])
         ]
+        changed_formulas = formula_changes or []
+        cleared_formulas = formula_to_blanks or []
+        removed_formulas = missing_formula_cells or []
         errors = [
             {
                 "cell": item["location"],
@@ -76,7 +88,7 @@ class AuditResult:
         incomplete = incomplete_findings or []
         status = (
             "FAIL"
-            if hardcodes or errors or violations
+            if hardcodes or cleared_formulas or removed_formulas or errors or violations
             else "INCOMPLETE"
             if incomplete
             else "PASS"
@@ -84,6 +96,9 @@ class AuditResult:
         return cls(
             passed=status == "PASS",
             hardcoded_regressions=hardcodes,
+            formula_changes=changed_formulas,
+            formula_to_blanks=cleared_formulas,
+            missing_formula_cells=removed_formulas,
             formula_errors=errors,
             rule_violations=violations,
             summary_stats=summary_stats or {},
@@ -143,6 +158,9 @@ def verify(
     record = result["record"]
     diff = result["diff"]
     hardcodes = diff.get("hardcode_overrides", []) if diff else []
+    formula_changes = diff.get("formula_changes", []) if diff else []
+    formula_to_blanks = diff.get("formula_to_blanks", []) if diff else []
+    missing_formula_cells = diff.get("missing_formula_cells", []) if diff else []
     formula_errors = (
         record.get("stats", {}).get("errors", [])
         if target.suffix.lower() == ".xlsx"
@@ -151,13 +169,19 @@ def verify(
     violations = record.get("rule_violations", [])
     return AuditResult.from_findings(
         hardcoded_regressions=hardcodes,
+        formula_changes=formula_changes,
+        formula_to_blanks=formula_to_blanks,
+        missing_formula_cells=missing_formula_cells,
         formula_errors=formula_errors,
         rule_violations=violations,
         incomplete_findings=record.get("incomplete_findings", []),
         summary_stats={
             "total_changes": diff["total_changes"] if diff else 0,
             "hardcode_overrides": len(hardcodes),
-            "formula_changes": len(diff.get("formula_changes", [])) if diff else 0,
+            "formula_changes": len(formula_changes),
+            "formula_to_blanks": len(formula_to_blanks),
+            "missing_formula_cells": len(missing_formula_cells),
+            "formula_errors": len(formula_errors),
             "value_changes": len(diff.get("value_changes", [])) if diff else 0,
             "rule_violations": len(violations),
             "incomplete_findings": len(record.get("incomplete_findings", [])),

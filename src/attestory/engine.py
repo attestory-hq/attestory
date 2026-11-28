@@ -189,6 +189,7 @@ def diff_snapshots(prev_pq: Path, curr_pq: Path) -> dict:
             COALESCE(p.cell_id, c.cell_id) AS cell_id,
             p.is_formula AS was_formula,
             c.is_formula AS is_formula,
+            c.cell_id IS NOT NULL AS is_present,
             p.formula AS old_formula,
             c.formula AS new_formula,
             p.val_str AS old_val,
@@ -196,8 +197,16 @@ def diff_snapshots(prev_pq: Path, curr_pq: Path) -> dict:
         FROM read_parquet('{prev_pq.as_posix()}') p
         FULL OUTER JOIN read_parquet('{curr_pq.as_posix()}') c
             ON p.sheet_name = c.sheet_name AND p.cell_id = c.cell_id
-        WHERE p.norm_formula IS DISTINCT FROM c.norm_formula
-           OR p.val_str IS DISTINCT FROM c.val_str
+        WHERE (
+            p.norm_formula IS DISTINCT FROM c.norm_formula
+            OR p.val_str IS DISTINCT FROM c.val_str
+        )
+          AND (
+              COALESCE(p.norm_formula, '') != ''
+              OR COALESCE(c.norm_formula, '') != ''
+              OR COALESCE(p.val_str, '') != ''
+              OR COALESCE(c.val_str, '') != ''
+          )
         ORDER BY sheet_name, cell_id
     """
     changes = con.execute(query).fetchall()
@@ -205,11 +214,21 @@ def diff_snapshots(prev_pq: Path, curr_pq: Path) -> dict:
 
     hardcode_overrides = []
     formula_changes = []
+    formula_to_blanks = []
+    missing_formula_cells = []
     value_changes = []
 
-    for sheet, cell, was_f, is_f, old_f, new_f, old_v, new_v in changes:
+    for sheet, cell, was_f, is_f, is_present, old_f, new_f, old_v, new_v in changes:
         loc = f"{sheet}!{cell}"
-        if was_f and not is_f and new_v != "":
+        if was_f and not is_present:
+            missing_formula_cells.append(
+                {"location": loc, "formula": old_f, "old_val": old_v}
+            )
+        elif was_f and not is_f and new_v == "":
+            formula_to_blanks.append(
+                {"location": loc, "formula": old_f, "old_val": old_v}
+            )
+        elif was_f and not is_f and new_v != "":
             hardcode_overrides.append(
                 {
                     "location": loc,
@@ -235,6 +254,8 @@ def diff_snapshots(prev_pq: Path, curr_pq: Path) -> dict:
         "total_changes": len(changes),
         "hardcode_overrides": hardcode_overrides,
         "formula_changes": formula_changes,
+        "formula_to_blanks": formula_to_blanks,
+        "missing_formula_cells": missing_formula_cells,
         "value_changes": value_changes,
     }
 
@@ -397,7 +418,14 @@ def _commit_file_locked(
     failed_checks = bool(
         stats.get("errors")
         or rule_violations
-        or (diff_report and diff_report.get("hardcode_overrides"))
+        or (
+            diff_report
+            and (
+                diff_report.get("hardcode_overrides")
+                or diff_report.get("formula_to_blanks")
+                or diff_report.get("missing_formula_cells")
+            )
+        )
     )
     audit_status = (
         "FAIL"
@@ -426,6 +454,14 @@ def _commit_file_locked(
             else 0,
             "formula_changes": len(diff_report["formula_changes"])
             if diff_report and "formula_changes" in diff_report
+            else 0,
+            "formula_to_blanks": len(diff_report.get("formula_to_blanks", []))
+            if diff_report
+            else 0,
+            "missing_formula_cells": len(
+                diff_report.get("missing_formula_cells", [])
+            )
+            if diff_report
             else 0,
         },
     }
@@ -469,7 +505,9 @@ def _commit_file_locked(
             lines.append(
                 f"- **Diff vs v{next_ver - 1}:** {diff_report['total_changes']} changes "
                 f"({len(diff_report['hardcode_overrides'])} hardcoded formula overrides, "
-                f"{len(diff_report['formula_changes'])} formula edits)"
+                f"{len(diff_report['formula_changes'])} formula edits, "
+                f"{len(diff_report['formula_to_blanks'])} formulas cleared, "
+                f"{len(diff_report['missing_formula_cells'])} formula cells removed)"
             )
             for ov in diff_report["hardcode_overrides"][:10]:
                 lines.append(
@@ -554,12 +592,20 @@ def workspace_status(root: Path) -> list[dict]:
         stats = commit.get("stats", {})
         violations = commit.get("rule_violations", [])
         diff_summary = commit.get("diff_summary", {})
-        errors_and_violations = len(stats.get("errors", [])) + len(violations)
+        errors_and_violations = (
+            len(stats.get("errors", []))
+            + len(violations)
+            + diff_summary.get("formula_to_blanks", 0)
+            + diff_summary.get("missing_formula_cells", 0)
+        )
         audit_status = commit.get("audit_status")
         if audit_status is None:
             audit_status = (
                 "FAIL"
-                if errors_and_violations or diff_summary.get("hardcode_overrides")
+                if errors_and_violations
+                or diff_summary.get("hardcode_overrides")
+                or diff_summary.get("formula_to_blanks")
+                or diff_summary.get("missing_formula_cells")
                 else "INCOMPLETE"
                 if (
                     filename.lower().endswith(".xlsx") and commit["version"] == 1

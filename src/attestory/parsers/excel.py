@@ -1,15 +1,36 @@
 import os
-import re
+import posixpath
 import shutil
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from zipfile import ZipFile
 
 import openpyxl
 import pyarrow as pa
 import pyarrow.parquet as pq
+from openpyxl.formula import Tokenizer
+from openpyxl.formula.tokenizer import TokenizerError
 
-EXCEL_ERRORS = {"#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A", "#NUM!"}
+EXCEL_ERRORS = {
+    "#NULL!",
+    "#DIV/0!",
+    "#VALUE!",
+    "#REF!",
+    "#NAME?",
+    "#NUM!",
+    "#N/A",
+    "#GETTING_DATA",
+    "#SPILL!",
+    "#CALC!",
+    "#FIELD!",
+    "#DATA!",
+    "#BLOCKED!",
+    "#UNKNOWN!",
+    "#CONNECT!",
+    "#BUSY!",
+}
 
 
 def _formula_cache_values(xlsx_path: Path) -> dict[str, tuple[str, object]]:
@@ -35,6 +56,40 @@ def _formula_cache_values(xlsx_path: Path) -> dict[str, tuple[str, object]]:
     wb_formulas.close()
     wb_values.close()
     return formulas
+
+
+def _stored_cell_ids(xlsx_path: Path) -> dict[str, set[str]]:
+    """Return worksheet cell references physically stored in the workbook XML."""
+    main_ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    document_rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    package_rel_ns = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+    with ZipFile(xlsx_path) as workbook:
+        workbook_xml = ET.fromstring(workbook.read("xl/workbook.xml"))
+        relationships_xml = ET.fromstring(
+            workbook.read("xl/_rels/workbook.xml.rels")
+        )
+        relationship_targets = {
+            relationship.attrib["Id"]: relationship.attrib["Target"]
+            for relationship in relationships_xml.findall(f"{package_rel_ns}Relationship")
+        }
+        cells_by_sheet = {}
+        for sheet in workbook_xml.findall(f".//{main_ns}sheet"):
+            target = relationship_targets[sheet.attrib[f"{document_rel_ns}id"]]
+            worksheet_path = (
+                target.lstrip("/")
+                if target.startswith("/")
+                else posixpath.normpath(posixpath.join("xl", target))
+            )
+            cell_ids = set()
+            with workbook.open(worksheet_path) as worksheet_xml:
+                for _, element in ET.iterparse(worksheet_xml, events=("end",)):
+                    if element.tag == f"{main_ns}c":
+                        cell_ids.add(element.attrib["r"])
+                        element.clear()
+                    elif element.tag == f"{main_ns}row":
+                        element.clear()
+            cells_by_sheet[sheet.attrib["name"]] = cell_ids
+    return cells_by_sheet
 
 
 def recalculate_xlsx(xlsx_path: Path) -> list[dict]:
@@ -107,10 +162,50 @@ def recalculate_xlsx(xlsx_path: Path) -> list[dict]:
 
 
 def normalize_formula(formula: str | None) -> str | None:
-    """Normalize Excel formulas by stripping whitespace and uppercasing for AST-like comparison."""
+    """Normalize formula tokens without changing quoted literals or intersections."""
     if not formula or not isinstance(formula, str) or not formula.startswith("="):
         return None
-    return re.sub(r"\s+", "", formula).upper()
+    try:
+        tokens = Tokenizer(formula).items
+    except TokenizerError:
+        return formula
+
+    normalized = []
+    for index, token in enumerate(tokens):
+        if token.type == "WHITE-SPACE":
+            previous = next(
+                (item for item in reversed(tokens[:index]) if item.type != "WHITE-SPACE"),
+                None,
+            )
+            following = next(
+                (
+                    item
+                    for item in tokens[index + 1 :]
+                    if item.type != "WHITE-SPACE"
+                ),
+                None,
+            )
+            if (
+                previous
+                and following
+                and (
+                    previous.type == "PAREN" and previous.subtype == "CLOSE"
+                    or previous.type == "OPERAND"
+                    and previous.subtype == "RANGE"
+                )
+                and (
+                    following.type == "PAREN" and following.subtype == "OPEN"
+                    or following.type == "OPERAND"
+                    and following.subtype == "RANGE"
+                )
+            ):
+                normalized.append(" ")
+            continue
+        if token.type == "OPERAND" and token.subtype == "TEXT":
+            normalized.append(token.value)
+        else:
+            normalized.append(token.value.upper())
+    return "".join(normalized)
 
 
 def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
@@ -122,6 +217,7 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
     errors = []
     formula_cache_warnings = []
     sheet_names = list(wb_formulas.sheetnames)
+    stored_cells = _stored_cell_ids(xlsx_path)
 
     for sheet_name in sheet_names:
         ws_f = wb_formulas[sheet_name]
@@ -132,11 +228,15 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
             start=1,
         ):
             for c_idx, (raw_f, raw_v) in enumerate(zip(row_f, row_v), start=1):
-                if raw_f is None and raw_v is None:
-                    continue
-
                 col_letter = openpyxl.utils.get_column_letter(c_idx)
                 cell_id = f"{col_letter}{r_idx}"
+                if (
+                    raw_f is None
+                    and raw_v is None
+                    and cell_id not in stored_cells.get(sheet_name, set())
+                ):
+                    continue
+
                 is_formula = isinstance(raw_f, str) and raw_f.startswith("=")
                 formula_str = raw_f if is_formula else ""
                 norm_formula = normalize_formula(raw_f) or ""
