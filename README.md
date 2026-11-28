@@ -2,263 +2,160 @@
 
 [![CI](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml/badge.svg)](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/attestory.svg)](https://pypi.org/project/attestory/)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
-**Make sure your numbers are Attestoried.**
-Local version control, deterministic formula auditing, and semantic diffs for AI-generated Excel (`.xlsx`), PowerPoint (`.pptx`), HTML dashboards, and CSV source data.
+**Audit AI-edited Excel workbooks before the numbers ship.**
 
----
+Attestory is a local-first Excel audit tool that catches silent formula
+regressions, formula deletions, calculation errors, and rule violations. It
+stores content-addressed snapshots beside the workbook and produces a signed,
+self-contained receipt.
 
-## Why Attestory?
-AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets effortless—but they also silently overwrite dynamic formulas (`=SUM(...)`) with hardcoded numbers, introduce `#REF!` errors, and create `Forecast_v7_FINAL.xlsx` chaos across email and Slack.
+```text
+Baseline:   Revenue!B4 = =SUM(B2:B3)
+Candidate:  Revenue!B4 = 412000
+Result:     FAIL — formula was replaced by a hardcoded value
+```
 
-**Attestory** creates a lightweight, local-first `.attestory/` audit folder right alongside your spreadsheets:
-- **Zero Cloud Uploads Required:** Structural snapshots are stored locally as Zstandard-compressed **Apache Parquet** files inside `.attestory/`.
-- **Atomic Local Commits:** Workspace commits are serialized locally, snapshots are staged and verified before history publication, and history is replaced atomically with source and snapshot SHA-256 digests.
-- **Deterministic Math & Formula Audits:** Uses `openpyxl` and **DuckDB** SQL diffs to catch formula-to-hardcode overwrites, formula deletions, changed references, and Excel calculation errors in milliseconds.
-- **PowerPoint Semantic Diffs:** Extracts slide text, native table cells, and embedded chart values into Zstandard-compressed Parquet snapshots, with DuckDB-powered comparisons between versions.
-- **Dashboard & Data Lineage:** Audits HTML dashboard KPIs, table cells, and external telemetry references; fingerprints CSV row counts, schemas, null counts, and numeric summaries.
-- **Persistent Assertions & Receipts:** Configure formula and numeric guardrails in `.attestory/rules.yaml`, then generate self-contained HTML audit receipts.
-- **Native AI Continuity:** Install the Claude Cowork / Claude Code skill directly into your workspace with `attestory install-skill`; it reads saved rules before editing and helps catch formula mistakes before presenting results.
+Everything runs locally. `.attestory/` contains verified Parquet snapshots,
+history, rules, signing keys, and HTML receipts; submitted workbooks are never
+uploaded or modified by an audit.
 
-PowerPoint snapshots recurse through nested native shape groups for text, table cells,
-and chart values. SmartArt is a separate extraction coverage gap and is not yet
-supported; track dedicated SmartArt support separately for presentations that require it.
+## Outcomes
 
----
+| Outcome | Meaning |
+|---|---|
+| **PASS** | The baseline exists and every required check completed successfully. |
+| **FAIL** | A required formula, numeric, cross-file, or cell check failed. |
+| **INCOMPLETE** | Required evidence was unavailable, such as a missing baseline, formula cache, or external input. |
 
-## Visual Proof
+A formula cache can be unavailable when openpyxl or LibreOffice has not supplied
+a calculated value. Use `attestory commit <file.xlsx> --recalculate` when
+LibreOffice is installed. Required incomplete checks block PASS.
 
-See the [sample HTML receipt](docs/examples/sample_receipt.html) in your browser.
+## Five-minute Excel quickstart
 
-![Attestory terminal receipt](docs/images/terminal-receipt.png)
-
-![Attestory HTML audit receipt](docs/images/html-report.png)
-
-## Quickstart
+Install from PyPI, or run this clean-checkout development setup:
 
 ```bash
-# Run the interactive demo immediately (zero setup required)
-uvx attestory demo
+python -m pip install -e .
+mkdir attestory-excel-demo
+cd attestory-excel-demo
+```
 
-# Install the Claude Cowork / Claude Code skill into your current workspace
-attestory install-skill
+Generate a workbook with an approved formula:
 
-# Install the Claude Code skill and automatically audit supported edits
-attestory install-skill --target claude-code --hook
+```bash
+python - <<'PY'
+import openpyxl
 
-# Or install globally with uv / pip
-uv tool install attestory
-# Or: pip install attestory
+workbook = openpyxl.Workbook()
+sheet = workbook.active
+sheet.title = "Revenue"
+sheet["B2"] = 200000
+sheet["B3"] = 212000
+sheet["B4"] = "=SUM(B2:B3)"
+workbook.save("Q4_Forecast.xlsx")
+PY
+```
 
-# Audit and snapshot a workbook (initializes .attestory/ automatically)
-attestory commit Q4_Forecast.xlsx -m "Initial baseline"
+Capture the baseline:
 
-# For edit paths without a pre-edit hook, capture the existing workbook before editing
-attestory snapshot-before Q4_Forecast.xlsx
+```bash
+attestory commit Q4_Forecast.xlsx -m "Approved formula baseline"
+```
 
-# After editing in Excel, Claude Cowork, or ChatGPT, commit to catch silent regressions
-attestory commit Q4_Forecast.xlsx -m "Updated November actuals"
+Replace the formula with a hardcoded number to simulate an AI or spreadsheet
+edit:
 
-# Optionally recalculate formulas with LibreOffice before auditing
-attestory commit Q4_Forecast.xlsx --recalculate
+```bash
+python - <<'PY'
+import openpyxl
 
-# 4. Inspect cell-level formula & value diffs
+path = "Q4_Forecast.xlsx"
+workbook = openpyxl.load_workbook(path)
+workbook["Revenue"]["B4"] = 412000
+workbook.save(path)
+PY
+```
+
+Run the audit and inspect the result:
+
+```bash
+attestory commit Q4_Forecast.xlsx -m "Edited forecast"
 attestory diff Q4_Forecast.xlsx
-
-# Snapshot and compare a presentation the same way
-attestory commit Board_Deck.pptx -m "Initial board deck"
-attestory commit Board_Deck.pptx -m "Updated ARR chart"
-attestory diff Board_Deck.pptx
-
-# Create a standalone report in .attestory/reports/
-attestory report Board_Deck.pptx
-
-# Snapshot and compare source data or an HTML dashboard
-attestory commit actuals.csv -m "Approved actuals"
-attestory commit executive_dashboard.html -m "Dashboard baseline"
-attestory diff actuals.csv
-
-# See the latest health of all tracked files
-attestory status
-
-# Automatically snapshot supported files when they are saved (Ctrl+C to stop)
-attestory watch
+attestory report Q4_Forecast.xlsx
 ```
 
-Use `attestory watch --recursive` to include subdirectories, or tune its save
-debounce with `attestory watch --debounce 1.0`.
+The first command creates the baseline snapshot. The edited workbook should
+produce `FAIL` and identify `Revenue!B4` as a formula-to-hardcode override.
+Open `.attestory/reports/Q4_Forecast_v2_receipt.html` in a browser. The baseline
+is normally `INCOMPLETE` until a formula cache or a prior baseline comparison is
+available.
 
-The watcher follows replacement-by-rename saves to supported destination files
-and retries transient read failures with bounded backoff. Exhausted retries
-leave the existing verified history unchanged and report the read failure.
-OneDrive and SharePoint synchronization behavior should be validated separately
-for each deployment.
+## Workflow
 
-Tracked artifacts are identified by their normalized workspace-relative paths,
-including extensions, so files such as `Finance/Forecast.xlsx`,
-`Sales/Forecast.xlsx`, and `Forecast.csv` have independent histories and
-snapshots. Older history entries are retained; because they contain only a
-basename, Attestory marks them as needing review rather than assuming which
-workspace path they belong to.
-
-## Python API and agent hooks
-
-The Python API runs in-process, without starting a server or invoking the CLI:
-
-```python
-import attestory
-
-attestory.snapshot("Q4_Forecast.xlsx", message="Approved baseline")
-# After editing:
-result = attestory.verify("Q4_Forecast.xlsx", message="Updated forecast")
-if not result.passed:
-    print(result.to_dict())
+```mermaid
+flowchart LR
+    A["Submitted workbook"] --> B["Temporary snapshot"]
+    B --> C["Deterministic Excel extraction"]
+    C --> D["Baseline diff + required rules"]
+    D --> E{"Required checks"}
+    E -->|All complete| F["PASS / FAIL"]
+    E -->|Evidence unavailable| G["INCOMPLETE"]
+    F --> H["Signed manifest + HTML receipt"]
+    G --> H
 ```
 
-`snapshot` and `verify` create local snapshots. `verify` returns an
-`attestory.AuditResult` with a `PASS`, `FAIL`, or `INCOMPLETE` status,
-hardcode regressions, formula errors, rule violations, incomplete-check reasons,
-and summary statistics. A first Excel capture is `INCOMPLETE` until a baseline
-exists. A failed check remains `FAIL` even when other checks are incomplete.
-Its `to_dict()` shape matches the compact
-JSON emitted by `attestory commit`, `diff`, `status`, and `report` with
-`--json`.
+<div align="center">
 
-Excel diffs distinguish formula edits, formula-to-hardcode overrides, formulas
-cleared to blank, and formula cells removed from the worksheet. Formula
-comparison preserves quoted text and significant reference intersections while
-ignoring cosmetic case and whitespace. Excel errors including `#SPILL!` and
-`#CALC!` are included in audit findings.
+[![Attestory HTML audit receipt: PASS, FAIL, and INCOMPLETE findings are shown with workbook and audit metadata](docs/images/html-report.png)](docs/examples/sample_receipt.html)
 
-For Claude Code, install the skill and opt into project-level pre/post hooks
-with `attestory install-skill --target claude-code --hook`. `PreToolUse`
-captures an existing `.xlsx`, `.pptx`, or `.csv` before `Write`, `Edit`, or
-`MultiEdit`; `PostToolUse` audits the saved candidate. The pre-edit capture is
-idempotent when the file has not changed since its latest snapshot, and history
-records the SHA-256 hash for each baseline and candidate. New files cannot have
-a pre-edit baseline and Excel audits remain `INCOMPLETE` until a later
-comparison. Other edit paths should run `attestory snapshot-before <file>`
-before editing; a post-edit snapshot cannot substitute for the original.
-Hooks are installed only in `.claude/settings.json`, preserve existing settings,
-and do not start a daemon. The `attestory` command must be available on Claude
-Code's `PATH`. Claude Cowork can use the installed skill; the project hooks
-apply only to Claude Code's `Write`, `Edit`, and `MultiEdit` tools.
+<sub><a href="docs/examples/sample_receipt.html">Open the sample HTML receipt</a></sub>
 
-## Rules and cross-file checks
+</div>
 
-Edit `.attestory/rules.yaml` to add deterministic assertions. Excel formula and
-numeric rules are evaluated whenever the workbook is committed. Cross-file
-checks run when either configured file is committed and compare the latest
-snapshots available for both files. Missing baselines or unsupported required
-checks are reported as `INCOMPLETE` with a reason; a mismatch or failed
-assertion is `FAIL`. `PASS` is reported only when a baseline exists and every
-required check completed successfully.
+## Supported Excel checks
 
-```yaml
-must_be_formula:
-  - Revenue!B4
-assertions:
-  - location: Revenue!B4
-    min_value: 100000
-    description: Total ARR floor
-  - location: Revenue!B5
-    max_value: 250000
-    description: Keep the forecast within approved bounds
-cross_file_checks:
-  - pptx_file: Board_Deck.pptx
-    xlsx_file: Q4_Forecast.xlsx
-    slide_num: 2
-    element_type: chart
-    label: ARR
-    location: Revenue!B4
-    tolerance: 0.01
-    description: Slide 2 ARR chart must match the forecast
-```
+- Formula edits and formula-to-hardcode overrides
+- Formula deletion and missing formula cells
+- Workbook formula errors such as `#REF!`, `#DIV/0!`, `#SPILL!`, and `#CALC!`
+- Missing formula caches and stale recalculated values
+- Numeric assertions and single-cell named ranges
+- Snapshot diffs, row/cell changes, and external-reference review
+- Versioned, signed manifests and offline verification
 
-Numeric assertions support `min_value`, `max_value`, and `equals`. Cross-file
-checks can compare any supported snapshots: Excel cells, PowerPoint slide
-metrics, HTML KPIs, or CSV summary statistics. Existing `pptx_file` /
-`xlsx_file` rules remain supported; generic rules use `file_a` and `file_b`
-with selectors such as `metric_a: {column_name: Revenue, label: SUM}` and
-`metric_b: {location: Revenue!B4}`. Rule violations appear in the terminal
-receipt, commit history, and changelog.
+![Terminal view of an Attestory receipt](docs/images/terminal-receipt.png)
 
-Excel formula cells without cached results are flagged in the commit output and
-HTML receipt; required numeric assertions that depend on those values are
-`INCOMPLETE` because their results cannot be verified.
-Excel rules may use a single-cell workbook or worksheet named range for
-`must_be_formula` and numeric assertions. Named ranges resolve against each
-captured workbook version. Missing, ambiguous, and unsupported ranges produce
-actionable `INCOMPLETE` findings; existing `Sheet!A1` coordinates remain supported.
-`attestory commit <file.xlsx> --recalculate` optionally recalculates the workbook
-with LibreOffice before snapshotting and evaluating assertions. LibreOffice must
-be installed. Recalculation uses a temporary working copy, so the submitted
-workbook remains byte-for-byte unchanged. When recalculation succeeds, the
-recalculated copy supplies the audit snapshot and its changed cached values are
-recorded. If recalculation fails, required checks are marked incomplete.
+For coverage boundaries and rule semantics, see
+[Excel verification coverage](docs/EXCEL_AUDIT.md).
 
-### Excel verification coverage
+## Support and limitations
 
-Supported checks include formula presence, numeric assertions, named-range
-resolution, hardcoded formula overrides, formula edits/deletions, formula-cache
-warnings, Excel formula errors, and row/cell diffs. Named ranges are supported
-only when they resolve to one worksheet cell in the captured workbook; ambiguous
-or unsupported ranges are recorded as skipped required checks.
+| Area | Supported | Boundary |
+|---|---|---|
+| Workbook format | `.xlsx` | Macro execution is not supported. |
+| Formula values | Formula structure, cached values, and LibreOffice recalculation | Missing caches can make required checks `INCOMPLETE`; external workbook results are not recalculated. |
+| Named ranges | A single-cell workbook or worksheet range | Ambiguous, dynamic, or unsupported ranges are incomplete/unsupported. |
+| External references | Detection and receipt reporting | Attestory does not resolve or verify external workbook contents. |
+| Other formats | PowerPoint, HTML, and CSV snapshots/diffs | Feature coverage differs from Excel; SmartArt and unstructured presentation content remain limited. |
+| Local access | Workspace files, history, and receipts | Cloud synchronization and OneDrive/SharePoint conflict behavior are deployment-specific. |
 
-Coverage boundaries: Attestory does not execute spreadsheet macros or external
-workbook recalculation. External formulas and external-link parts are listed
-separately as unresolved external references. Formula assertions that depend on
-a missing cached value or unresolved external input are `INCOMPLETE`, not PASS.
-Required baseline, formula, numeric, cross-file, recalculation, cache, and
-external-reference checks are recorded in each manifest and receipt with
-`executed`, `failed`, `skipped`, or `unsupported` status and an explanatory reason.
+## Learn more
 
-The labeled regression corpus is under
-`tests/fixtures/excel_verification/cases.yaml`; it covers row insertion with
-named ranges, formula deletion, missing formula caches, and unresolved external
-references. These cases run in the pytest CI matrix for Python 3.11 and 3.12.
+- [Excel verification coverage](docs/EXCEL_AUDIT.md)
+- [Python API, hooks, server, and integration configuration](docs/INTEGRATIONS.md)
+- [Rules example](examples/rules.yaml)
+- [Labeled regression corpus](tests/fixtures/excel_verification/cases.yaml)
+- [Contributing](CONTRIBUTING.md)
+- [Apache-2.0 license](LICENSE)
 
-Audit manifests use canonical JSON serialization (`sort_keys=True`, compact UTF-8
-JSON, no whitespace) and Ed25519 signatures. Each workspace keypair is stored under
-`.attestory/signing/`; the private key is excluded from source control and the public
-key may be shared as the trusted verifier key. The key ID is
-`sha256:<hex>` from the public key's DER SubjectPublicKeyInfo.
+## Repository
 
-Verify a saved audit offline without the workspace history:
+- Report bugs or request Excel coverage through [GitHub Issues](https://github.com/attestory-hq/attestory/issues).
+- Propose changes through [Pull Requests](https://github.com/attestory-hq/attestory/pulls).
+- Current CI runs on Python 3.11 and 3.12.
 
-```bash
-attestory verify-manifest .attestory/history.json Model.xlsx \
-  --public-key .attestory/signing/public_key.pem --version 1
-```
-
-The verifier reports signature validity and workbook hash match separately from the
-recorded audit outcome. Use `attestory keygen` to create or report the workspace keys.
-
-HTML snapshots parse KPI/metric elements and table cells and flag externally
-hosted scripts or tracking images for review. CSV snapshots track dataset row
-counts, column types, null counts, and numeric `SUM`, `AVG`, `MIN`, and `MAX`
-values, making source-data drift visible alongside workbook and presentation
-changes.
-
-## ChatGPT Actions
-
-Install and start the local FastAPI bridge with:
-
-```bash
-pip install "attestory[server]"
-attestory serve --host 127.0.0.1 --port 8765
-```
-
-The bridge provides `/health`, `/v1/context`, `/v1/commit`, `/v1/diff/{filename}`,
-and `/v1/report/{filename}` as described in
-[`skills/chatgpt-action/openapi.yaml`](skills/chatgpt-action/openapi.yaml).
-It is scoped to the current workspace and binds to localhost by default.
-Do not expose it directly to an untrusted network; ChatGPT Actions need a
-separately secured HTTPS adapter or tunnel.
-
----
-
-## License
-Apache-2.0
+Attestory is open source and processes artifacts locally. Audit history,
+snapshots, and signing keys must be secured as sensitive project evidence.
