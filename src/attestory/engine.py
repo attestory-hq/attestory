@@ -15,7 +15,10 @@ from attestory.parsers.csv_extract import (
     diff_csv_snapshots,
     extract_csv_to_parquet,
 )
-from attestory.parsers.excel import extract_xlsx_to_parquet, recalculate_xlsx
+from attestory.parsers.excel import (
+    extract_xlsx_to_parquet,
+    recalculate_xlsx_with_metadata,
+)
 from attestory.parsers.html import diff_html_snapshots, extract_html_to_parquet
 from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
 from attestory.rules import evaluate_rules
@@ -346,7 +349,18 @@ def _commit_file_locked(
     if recalculate and extension != ".xlsx":
         raise ValueError("--recalculate is only supported for .xlsx workbooks.")
 
-    recalculation_warnings = recalculate_xlsx(target_file) if recalculate else []
+    submitted_sha256 = sha256_file(target_file)
+    recalculation = None
+    audited_file = target_file
+    if recalculate:
+        recalculation = recalculate_xlsx_with_metadata(target_file)
+        if recalculation["status"] == "success":
+            audited_file = recalculation["audit_path"]
+        else:
+            audited_file = target_file
+    recalculation_warnings = (
+        recalculation["changed_cached_values"] if recalculation else []
+    )
 
     manifest_path = meta_dir / "history.json"
     history = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -371,9 +385,9 @@ def _commit_file_locked(
         ".csv": extract_csv_to_parquet,
     }
     staged_pq = meta_dir / "snapshots" / f".attestory-stage-{uuid.uuid4().hex}.parquet"
-    file_hash = sha256_file(target_file)
+    file_hash = submitted_sha256
     try:
-        stats = extractors[extension](target_file, staged_pq)
+        stats = extractors[extension](audited_file, staged_pq)
         if sha256_file(target_file) != file_hash:
             raise RuntimeError(
                 f"Artifact changed while creating its snapshot: {target_key}. "
@@ -392,6 +406,8 @@ def _commit_file_locked(
             raise RuntimeError(f"Published snapshot digest mismatch: {curr_pq}")
     finally:
         staged_pq.unlink(missing_ok=True)
+        if recalculation and recalculation.get("audit_path"):
+            Path(recalculation["audit_path"]).unlink(missing_ok=True)
 
     if recalculation_warnings:
         warnings_by_location = {
@@ -413,6 +429,38 @@ def _commit_file_locked(
     )
     rule_violations = rule_results["violations"]
     incomplete_findings = rule_results["incomplete_findings"]
+    if recalculation and recalculation["status"] == "failed":
+        required_rules = {"must_be_formula", "numeric_assertion", "cross_file_check"}
+        retained_violations = []
+        for violation in rule_violations:
+            if violation.get("rule") in required_rules:
+                incomplete_findings.append(
+                    {
+                        "rule": "recalculation",
+                        "location": violation.get("location", target_key),
+                        "reason": (
+                            "LibreOffice recalculation failed; "
+                            f"{recalculation['error']} Required inputs are unavailable."
+                        ),
+                    }
+                )
+            else:
+                retained_violations.append(violation)
+        rule_violations = retained_violations
+        if not any(
+            finding["rule"] == "recalculation"
+            for finding in incomplete_findings
+        ):
+            incomplete_findings.append(
+                {
+                    "rule": "recalculation",
+                    "location": target_key,
+                    "reason": (
+                        "LibreOffice recalculation failed; "
+                        f"{recalculation['error']} Required inputs are unavailable."
+                    ),
+                }
+            )
     if extension == ".xlsx" and not file_commits:
         incomplete_findings.append(
             {
@@ -449,6 +497,21 @@ def _commit_file_locked(
         if incomplete_findings
         else "PASS"
     )
+    recalculation_record = None
+    if recalculation:
+        recalculation_record = {
+            "status": recalculation["status"],
+            "submitted_sha256": recalculation["submitted_sha256"],
+            "recalculated_sha256": recalculation["recalculated_sha256"],
+            "calculation_engine": recalculation["calculation_engine"],
+            "calculation_engine_version": recalculation[
+                "calculation_engine_version"
+            ],
+            "changed_cached_values": recalculation["changed_cached_values"],
+            "audit_artifact": recalculation["audit_artifact"],
+            "audit_artifact_sha256": recalculation["audit_artifact_sha256"],
+            "error": recalculation["error"],
+        }
     baseline_commit = file_commits[-1] if file_commits else None
     rules_path = meta_dir / "rules.yaml"
     ruleset_digest = (
@@ -506,6 +569,7 @@ def _commit_file_locked(
         "engine_version": engine_version(),
         "outcome": audit_status,
         "findings": findings,
+        "recalculation": recalculation_record,
     }
     record = {
         "version": next_ver,
@@ -520,6 +584,30 @@ def _commit_file_locked(
         "rule_violations": rule_violations,
         "incomplete_findings": incomplete_findings,
         "audit_status": audit_status,
+        "submitted_workbook_sha256": submitted_sha256,
+        "recalculated_workbook_sha256": (
+            recalculation["recalculated_sha256"] if recalculation else None
+        ),
+        "audited_artifact": (
+            recalculation["audit_artifact"]
+            if recalculation
+            else "submitted_workbook"
+        ),
+        "audited_artifact_sha256": (
+            recalculation["audit_artifact_sha256"]
+            if recalculation
+            else submitted_sha256
+        ),
+        "calculation_engine": (
+            recalculation["calculation_engine"] if recalculation else None
+        ),
+        "calculation_engine_version": (
+            recalculation["calculation_engine_version"] if recalculation else None
+        ),
+        "changed_cached_values": (
+            recalculation["changed_cached_values"] if recalculation else []
+        ),
+        "recalculation": recalculation_record,
         "audit_id": audit_id,
         "manifest_schema_version": AUDIT_MANIFEST_SCHEMA_VERSION,
         "schema_version": AUDIT_MANIFEST_SCHEMA_VERSION,

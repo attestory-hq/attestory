@@ -369,6 +369,7 @@ def test_recalculate_detects_stale_cached_formula_values(tmp_path: Path, monkeyp
     workbook = tmp_path / "Model.xlsx"
     _build_sample_workbook(workbook)
     _set_cached_formula_value(workbook, 410000)
+    submitted_bytes = workbook.read_bytes()
     init_workspace(tmp_path)
     (tmp_path / ".attestory" / "rules.yaml").write_text(
         "assertions:\n  - location: Revenue!B4\n    equals: 412000\n",
@@ -377,6 +378,12 @@ def test_recalculate_detects_stale_cached_formula_values(tmp_path: Path, monkeyp
     monkeypatch.setattr("attestory.parsers.excel.shutil.which", lambda _: "soffice")
 
     def fake_soffice(command, **_kwargs):
+        if "--version" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="LibreOffice 24.8.4",
+                stderr="",
+            )
         source = Path(command[-1])
         output_dir = Path(command[command.index("--outdir") + 1])
         output = output_dir / source.name
@@ -400,8 +407,69 @@ def test_recalculate_detects_stale_cached_formula_values(tmp_path: Path, monkeyp
     ]
     assert (
         openpyxl.load_workbook(workbook, data_only=True)["Revenue"]["B4"].value
-        == 412000
+        == 410000
     )
+    assert workbook.read_bytes() == submitted_bytes
+    assert result["record"]["submitted_workbook_sha256"] == hashlib.sha256(
+        submitted_bytes
+    ).hexdigest()
+    assert result["record"]["recalculated_workbook_sha256"]
+    assert result["record"]["audited_artifact"] == "recalculated_working_copy"
+    assert result["record"]["calculation_engine"] == "LibreOffice"
+    assert result["record"]["calculation_engine_version"] == "LibreOffice 24.8.4"
+    assert result["record"]["changed_cached_values"] == [
+        {
+            "location": "Revenue!B4",
+            "formula": "=SUM(B2:B3)",
+            "warning": "stale",
+            "previous_value": 410000,
+            "recalculated_value": 412000,
+        }
+    ]
+
+
+def test_failed_recalculation_preserves_workbook_and_marks_checks_incomplete(
+    tmp_path: Path, monkeypatch
+):
+    workbook = tmp_path / "Model.xlsx"
+    _build_sample_workbook(workbook)
+    _set_cached_formula_value(workbook, 410000)
+    submitted_bytes = workbook.read_bytes()
+    init_workspace(tmp_path)
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "assertions:\n  - location: Revenue!B4\n    equals: 412000\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("attestory.parsers.excel.shutil.which", lambda _: "soffice")
+
+    def fake_soffice(command, **_kwargs):
+        if "--version" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="LibreOffice 24.8.4",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="controlled recalculation failure",
+        )
+
+    monkeypatch.setattr("attestory.parsers.excel.subprocess.run", fake_soffice)
+
+    result = commit_file(tmp_path, workbook, recalculate=True)
+
+    assert workbook.read_bytes() == submitted_bytes
+    assert result["record"]["audit_status"] == "INCOMPLETE"
+    assert result["record"]["rule_violations"] == []
+    assert any(
+        finding["rule"] == "recalculation"
+        for finding in result["record"]["incomplete_findings"]
+    )
+    assert result["record"]["recalculated_workbook_sha256"] is None
+    assert result["record"]["audited_artifact"] == "submitted_workbook"
+    assert result["record"]["calculation_engine"] == "LibreOffice"
+    assert result["record"]["changed_cached_values"] == []
 
 
 def test_recalculate_requires_libreoffice(tmp_path: Path, monkeypatch):

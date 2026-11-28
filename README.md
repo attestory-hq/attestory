@@ -194,8 +194,10 @@ captured workbook version. Missing, ambiguous, and unsupported ranges produce
 actionable `INCOMPLETE` findings; existing `Sheet!A1` coordinates remain supported.
 `attestory commit <file.xlsx> --recalculate` optionally recalculates the workbook
 with LibreOffice before snapshotting and evaluating assertions. LibreOffice must
-be installed, and recalculation updates the workbook file. When recalculation
-changes a formula's cached result, the receipt identifies it as stale.
+be installed. Recalculation uses a temporary working copy, so the submitted
+workbook remains byte-for-byte unchanged. When recalculation succeeds, the
+recalculated copy supplies the audit snapshot and its changed cached values are
+recorded. If recalculation fails, required checks are marked incomplete.
 
 HTML snapshots parse KPI/metric elements and table cells and flag externally
 hosted scripts or tracking images for review. CSV snapshots track dataset row
