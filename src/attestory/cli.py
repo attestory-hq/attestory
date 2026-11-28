@@ -720,8 +720,14 @@ def diff(
             )
 
 
-def generate_report(root: Path, filename: str) -> dict:
-    """Create a self-contained HTML receipt for the latest snapshot."""
+def generate_report(
+    root: Path,
+    filename: str,
+    *,
+    version: int | None = None,
+    audit_id: str | None = None,
+) -> dict:
+    """Create a self-contained HTML receipt for one saved snapshot audit."""
     key = artifact_key(root, Path(filename))
     history_path = root / ATTESTORY_DIR / "history.json"
     if not history_path.exists():
@@ -734,14 +740,40 @@ def generate_report(root: Path, filename: str) -> dict:
     if not commits:
         raise FileNotFoundError(f"No commits recorded for {key}.")
 
-    latest = commits[-1]
+    if audit_id is not None:
+        matches = [commit for commit in commits if commit.get("audit_id") == audit_id]
+        if not matches:
+            raise FileNotFoundError(f"No audit {audit_id} recorded for {key}.")
+        latest = matches[-1]
+    elif version is not None:
+        matches = [commit for commit in commits if commit.get("version") == version]
+        if not matches:
+            raise FileNotFoundError(f"No audit version {version} recorded for {key}.")
+        latest = matches[-1]
+    else:
+        latest = commits[-1]
+    latest_index = commits.index(latest)
+    manifest = latest.get("audit_manifest")
+    if manifest is None:
+        manifest = {
+            "schema_version": None,
+            "audit_id": None,
+            "baseline_sha256": None,
+            "candidate_sha256": latest.get("sha256"),
+            "baseline_snapshot_sha256": None,
+            "candidate_snapshot_sha256": latest.get("snapshot_sha256"),
+            "evaluated_ruleset_digest": None,
+            "engine_version": None,
+            "outcome": latest.get("audit_status"),
+            "findings": latest.get("findings", []),
+        }
     diff = (
         diff_file_snapshots(
-            root / commits[-2]["snapshot"],
+            root / commits[latest_index - 1]["snapshot"],
             root / latest["snapshot"],
             key,
         )
-        if len(commits) > 1
+        if latest_index > 0
         else None
     )
     hardcodes = len(diff.get("hardcode_overrides", [])) if diff else 0
@@ -904,7 +936,13 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
 <header><span class="badge">{status}</span><h1>Attestory Receipt</h1><div>{escape(latest["file"])} · Version {latest["version"]}</div>
 <div class="meta"><span><strong>SHA-256</strong> {escape(latest["sha256"])}</span>
 <span><strong>Timestamp</strong> {escape(latest["timestamp"])}</span>
-<span><strong>Commit note</strong> {escape(latest["message"])}</span></div></header>
+<span><strong>Commit note</strong> {escape(latest["message"])}</span>
+<span><strong>Audit ID</strong> {escape(manifest.get("audit_id") or "unavailable (legacy history)")}</span>
+<span><strong>Manifest schema</strong> {escape(str(manifest.get("schema_version"))) if manifest.get("schema_version") is not None else "unavailable (legacy history)"}</span>
+<span><strong>Engine version</strong> {escape(manifest.get("engine_version") or "unavailable (legacy history)")}</span>
+<span><strong>Evaluated ruleset digest</strong> {escape(manifest.get("evaluated_ruleset_digest") or "unavailable")}</span>
+<span><strong>Baseline SHA-256</strong> {escape(manifest.get("baseline_sha256") or "not available")}</span>
+<span><strong>Baseline snapshot digest</strong> {escape(manifest.get("baseline_snapshot_sha256") or "not available")}</span></div></header>
 <section class="cards"><div class="card"><span>Total Changes</span><strong>{total_changes}</strong></div>
 <div class="card"><span>Hardcode Overrides</span><strong>{hardcodes}</strong></div>
 <div class="card"><span>Formula Edits</span><strong>{formulas}</strong></div>
@@ -967,15 +1005,21 @@ def report(
     file: Path = typer.Argument(
         ..., help="Tracked .xlsx, .pptx, .html, or .csv file to report on."
     ),
+    version: int | None = typer.Option(
+        None, "--version", "-v", help="Render a specific saved audit version."
+    ),
+    audit_id: str | None = typer.Option(
+        None, "--audit-id", help="Render a specific saved audit ID."
+    ),
     json_output: bool = typer.Option(
         False, "--json", help="Output strict machine-readable JSON."
     ),
 ):
-    """Generate a standalone HTML audit receipt for the latest snapshot."""
+    """Generate a standalone HTML audit receipt for a saved snapshot."""
     try:
         root = Path.cwd()
         key = artifact_key(root, file)
-        result = generate_report(root, key)
+        result = generate_report(root, key, version=version, audit_id=audit_id)
     except FileNotFoundError as error:
         if json_output:
             print_machine_output(
@@ -998,8 +1042,24 @@ def report(
         history = json.loads(
             (root / ATTESTORY_DIR / "history.json").read_text(encoding="utf-8")
         )
-        latest = commits_for_artifact(history, key)[-1]
         file_commits = commits_for_artifact(history, key)
+        if audit_id is not None:
+            latest_matches = [
+                commit
+                for commit in file_commits
+                if commit.get("audit_id") == audit_id
+            ]
+            latest = latest_matches[-1]
+        elif version is not None:
+            latest_matches = [
+                commit
+                for commit in file_commits
+                if commit.get("version") == version
+            ]
+            latest = latest_matches[-1]
+        else:
+            latest = file_commits[-1]
+        latest_index = file_commits.index(latest)
         violations = latest.get("rule_violations", [])
         formula_errors = (
             latest.get("stats", {}).get("errors", [])
@@ -1008,11 +1068,11 @@ def report(
         )
         diff = (
             diff_file_snapshots(
-                root / file_commits[-2]["snapshot"],
+                root / file_commits[latest_index - 1]["snapshot"],
                 root / latest["snapshot"],
                 key,
             )
-            if len(file_commits) >= 2
+            if latest_index > 0
             else None
         )
         hardcodes = diff.get("hardcode_overrides", []) if diff else []

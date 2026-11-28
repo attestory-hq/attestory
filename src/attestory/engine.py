@@ -21,6 +21,21 @@ from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
 from attestory.rules import evaluate_rules
 
 ATTESTORY_DIR = ".attestory"
+AUDIT_MANIFEST_SCHEMA_VERSION = 1
+
+
+def engine_version() -> str:
+    """Return the installed engine version without creating a circular import."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("attestory")
+    except PackageNotFoundError:
+        return "0.3.2"
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 @contextmanager
@@ -434,6 +449,64 @@ def _commit_file_locked(
         if incomplete_findings
         else "PASS"
     )
+    baseline_commit = file_commits[-1] if file_commits else None
+    rules_path = meta_dir / "rules.yaml"
+    ruleset_digest = (
+        _sha256_bytes(rules_path.read_bytes())
+        if rules_path.is_file()
+        else None
+    )
+    audit_id = f"aud_{uuid.uuid4().hex}"
+    findings = []
+    for finding in incomplete_findings:
+        findings.append({"kind": "incomplete", **finding})
+    for violation in rule_violations:
+        findings.append({"kind": "rule_violation", **violation})
+    for error in stats.get("errors", []):
+        findings.append({"kind": "formula_error", **error})
+    if diff_report:
+        for kind, entries in (
+            ("hardcode_override", diff_report.get("hardcode_overrides", [])),
+            ("formula_change", diff_report.get("formula_changes", [])),
+            ("formula_to_blank", diff_report.get("formula_to_blanks", [])),
+            ("missing_formula_cell", diff_report.get("missing_formula_cells", [])),
+            ("value_change", diff_report.get("value_changes", [])),
+        ):
+            for finding in entries:
+                findings.append({"kind": kind, **finding})
+    audit_manifest = {
+        "schema_version": AUDIT_MANIFEST_SCHEMA_VERSION,
+        "audit_id": audit_id,
+        "baseline_sha256": baseline_commit.get("sha256") if baseline_commit else None,
+        "candidate_sha256": file_hash,
+        "baseline_hash": baseline_commit.get("sha256") if baseline_commit else None,
+        "candidate_hash": file_hash,
+        "baseline": {
+            "status": "available" if baseline_commit else "missing",
+            "sha256": baseline_commit.get("sha256") if baseline_commit else None,
+            "snapshot_sha256": (
+                baseline_commit.get("snapshot_sha256") if baseline_commit else None
+            ),
+        },
+        "candidate": {
+            "sha256": file_hash,
+            "snapshot_sha256": snapshot_hash,
+        },
+        "baseline_snapshot_sha256": (
+            baseline_commit.get("snapshot_sha256") if baseline_commit else None
+        ),
+        "candidate_snapshot_sha256": snapshot_hash,
+        "snapshot_digests": {
+            "baseline": baseline_commit.get("snapshot_sha256") if baseline_commit else None,
+            "candidate": snapshot_hash,
+        },
+        "evaluated_ruleset_digest": ruleset_digest,
+        "ruleset_digest": ruleset_digest,
+        "ruleset_sha256": ruleset_digest,
+        "engine_version": engine_version(),
+        "outcome": audit_status,
+        "findings": findings,
+    }
     record = {
         "version": next_ver,
         "file": target_key,
@@ -447,6 +520,23 @@ def _commit_file_locked(
         "rule_violations": rule_violations,
         "incomplete_findings": incomplete_findings,
         "audit_status": audit_status,
+        "audit_id": audit_id,
+        "manifest_schema_version": AUDIT_MANIFEST_SCHEMA_VERSION,
+        "schema_version": AUDIT_MANIFEST_SCHEMA_VERSION,
+        "baseline_sha256": audit_manifest["baseline_sha256"],
+        "candidate_sha256": file_hash,
+        "baseline_hash": audit_manifest["baseline_hash"],
+        "candidate_hash": audit_manifest["candidate_hash"],
+        "baseline_snapshot_sha256": audit_manifest["baseline_snapshot_sha256"],
+        "candidate_snapshot_sha256": snapshot_hash,
+        "snapshot_digests": audit_manifest["snapshot_digests"],
+        "evaluated_ruleset_digest": ruleset_digest,
+        "ruleset_digest": ruleset_digest,
+        "ruleset_sha256": ruleset_digest,
+        "engine_version": audit_manifest["engine_version"],
+        "outcome": audit_status,
+        "findings": findings,
+        "audit_manifest": audit_manifest,
         "diff_summary": {
             "total_changes": diff_report["total_changes"] if diff_report else 0,
             "hardcode_overrides": len(diff_report.get("hardcode_overrides", []))
