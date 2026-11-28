@@ -9,7 +9,13 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from attestory.engine import ATTESTORY_DIR, commit_file, sha256_file
+from attestory.engine import (
+    ATTESTORY_DIR,
+    artifact_key,
+    commit_file,
+    commits_for_artifact,
+    sha256_file,
+)
 
 SUPPORTED_EXTENSIONS = {".xlsx", ".pptx", ".html", ".csv"}
 IGNORED_DIRECTORIES = {".attestory", ".git", ".venv", "__pycache__"}
@@ -34,9 +40,9 @@ def snapshot_if_changed(root: Path, path: Path) -> dict | None:
     manifest_path = root / ATTESTORY_DIR / "history.json"
     if manifest_path.exists():
         history = json.loads(manifest_path.read_text(encoding="utf-8"))
-        commits = [
-            item for item in history.get("commits", []) if item["file"] == path.name
-        ]
+        commits = commits_for_artifact(
+            history, artifact_key(root, path), include_legacy=False
+        )
         if commits and commits[-1]["sha256"] == sha256_file(path):
             return None
 

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 from enum import Enum
@@ -13,7 +14,9 @@ from rich.table import Table
 from attestory.api import AuditResult, verify
 from attestory.engine import (
     ATTESTORY_DIR,
+    artifact_key,
     commit_file,
+    commits_for_artifact,
     diff_file_snapshots,
     init_workspace,
     workspace_status,
@@ -163,16 +166,27 @@ def status(
         latest_by_file = {}
         previous_by_file = {}
         for commit in commits:
-            if commit["file"] in latest_by_file:
-                previous_by_file[commit["file"]] = latest_by_file[commit["file"]]
-            latest_by_file[commit["file"]] = commit
+            identity = commit.get("artifact_key") or f"legacy:{commit['file']}"
+            if identity in latest_by_file:
+                previous_by_file[identity] = latest_by_file[identity]
+            latest_by_file[identity] = commit
         formula_errors = []
         violations = []
         hardcodes = []
-        for commit in latest_by_file.values():
+        identity_warnings = []
+        for identity, commit in latest_by_file.items():
             formula_errors.extend(commit.get("stats", {}).get("errors", []))
             violations.extend(commit.get("rule_violations", []))
-            previous = previous_by_file.get(commit["file"])
+            if not commit.get("artifact_key"):
+                identity_warnings.append(
+                    {
+                        "rule": "ambiguous_legacy_identity",
+                        "location": commit["file"],
+                        "expected": "workspace-relative artifact path",
+                        "actual": "basename-only legacy history",
+                    }
+                )
+            previous = previous_by_file.get(identity)
             if previous:
                 diff = diff_file_snapshots(
                     root / previous["snapshot"],
@@ -180,6 +194,7 @@ def status(
                     commit["file"],
                 )
                 hardcodes.extend(diff.get("hardcode_overrides", []))
+        violations.extend(identity_warnings)
         output = machine_output(
             hardcoded_regressions=hardcodes,
             formula_errors=formula_errors,
@@ -190,7 +205,8 @@ def status(
                     len(commit.get("rule_violations", []))
                     + len(commit.get("stats", {}).get("errors", []))
                     for commit in latest_by_file.values()
-                ),
+                )
+                + len(identity_warnings),
             },
         )
         print_machine_output(output)
@@ -412,7 +428,7 @@ def commit(
 @app.command()
 def diff(
     file: Path = typer.Argument(
-        ..., help="Filename (.xlsx, .pptx, .html, or .csv) to compare snapshots."
+        ..., help="Workspace-relative artifact path to compare snapshots."
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Output strict machine-readable JSON."
@@ -433,7 +449,8 @@ def diff(
         raise typer.Exit(1)
 
     history = json.loads(manifest.read_text(encoding="utf-8"))
-    commits = [c for c in history["commits"] if c["file"] == file.name]
+    key = artifact_key(root, file)
+    commits = commits_for_artifact(history, key)
     if len(commits) < 2:
         if json_output:
             print_machine_output(
@@ -448,7 +465,7 @@ def diff(
     res = diff_file_snapshots(
         root / commits[-2]["snapshot"],
         root / commits[-1]["snapshot"],
-        file.name,
+        key,
     )
     if json_output:
         latest = commits[-1]
@@ -520,7 +537,7 @@ def diff(
 
 def generate_report(root: Path, filename: str) -> dict:
     """Create a self-contained HTML receipt for the latest snapshot."""
-    file = Path(filename)
+    key = artifact_key(root, Path(filename))
     history_path = root / ATTESTORY_DIR / "history.json"
     if not history_path.exists():
         raise FileNotFoundError(
@@ -528,16 +545,16 @@ def generate_report(root: Path, filename: str) -> dict:
         )
 
     history = json.loads(history_path.read_text(encoding="utf-8"))
-    commits = [entry for entry in history["commits"] if entry["file"] == file.name]
+    commits = commits_for_artifact(history, key)
     if not commits:
-        raise FileNotFoundError(f"No commits recorded for {file.name}.")
+        raise FileNotFoundError(f"No commits recorded for {key}.")
 
     latest = commits[-1]
     diff = (
         diff_file_snapshots(
             root / commits[-2]["snapshot"],
             root / latest["snapshot"],
-            file.name,
+            key,
         )
         if len(commits) > 1
         else None
@@ -551,6 +568,8 @@ def generate_report(root: Path, filename: str) -> dict:
         or hardcodes
         or violations
         or latest.get("stats", {}).get("external_references")
+        or latest.get("identity_ambiguous")
+        or not latest.get("artifact_key")
     )
     status = "NEEDS REVIEW" if review_needed else "VERIFIED"
     total_changes = diff["total_changes"] if diff else 0
@@ -672,7 +691,18 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
     reports_dir = root / ATTESTORY_DIR / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     report_stem = Path(latest["file"]).stem.replace(" ", "_")
-    report_path = reports_dir / f"{report_stem}_v{latest['version']}_receipt.html"
+    matching_artifacts = {
+        commit.get("artifact_key") or commit["file"]
+        for commit in history["commits"]
+        if Path(commit.get("artifact_key", commit["file"])).stem
+        == Path(latest["file"]).stem
+    }
+    report_identity = ""
+    if "/" in key or len(matching_artifacts) > 1:
+        report_identity = f"_{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
+    report_path = reports_dir / (
+        f"{report_stem}{report_identity}_v{latest['version']}_receipt.html"
+    )
     report_path.write_text(html, encoding="utf-8")
     return {
         "path": str(report_path.relative_to(root)),
@@ -705,7 +735,9 @@ def report(
 ):
     """Generate a standalone HTML audit receipt for the latest snapshot."""
     try:
-        result = generate_report(Path.cwd(), file.name)
+        root = Path.cwd()
+        key = artifact_key(root, file)
+        result = generate_report(root, key)
     except FileNotFoundError as error:
         if json_output:
             print_machine_output(machine_output(summary_stats={"rule_violations": 0}))
@@ -717,14 +749,8 @@ def report(
         history = json.loads(
             (root / ATTESTORY_DIR / "history.json").read_text(encoding="utf-8")
         )
-        latest = next(
-            commit
-            for commit in reversed(history["commits"])
-            if commit["file"] == file.name
-        )
-        file_commits = [
-            commit for commit in history["commits"] if commit["file"] == file.name
-        ]
+        latest = commits_for_artifact(history, key)[-1]
+        file_commits = commits_for_artifact(history, key)
         violations = latest.get("rule_violations", [])
         formula_errors = (
             latest.get("stats", {}).get("errors", [])
@@ -735,7 +761,7 @@ def report(
             diff_file_snapshots(
                 root / file_commits[-2]["snapshot"],
                 root / latest["snapshot"],
-                file.name,
+                key,
             )
             if len(file_commits) >= 2
             else None
@@ -799,7 +825,7 @@ def watch(
 @app.command()
 def log(
     file: Path = typer.Argument(
-        ..., help="Filename (e.g. Q4_Forecast.xlsx) to display commit history."
+        ..., help="Workspace-relative artifact path to display commit history."
     ),
 ):
     """Display the Attestory version history for a tracked workbook."""
@@ -812,12 +838,13 @@ def log(
         raise typer.Exit(1)
 
     history = json.loads(manifest.read_text(encoding="utf-8"))
-    commits = [c for c in history["commits"] if c["file"] == file.name]
+    key = artifact_key(root, file)
+    commits = commits_for_artifact(history, key)
     if not commits:
         console.print(f"[yellow]No commits recorded yet for {file.name}.[/yellow]")
         raise typer.Exit(0)
 
-    table = Table(title=f"Attestory History — {file.name}")
+    table = Table(title=f"Attestory History — {key}")
     table.add_column("Version")
     table.add_column("Timestamp (UTC)")
     table.add_column("SHA-256")

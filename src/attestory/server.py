@@ -7,7 +7,13 @@ from fastapi import FastAPI, HTTPException, Request
 
 from attestory import __version__
 from attestory.cli import generate_report
-from attestory.engine import ATTESTORY_DIR, commit_file, diff_file_snapshots
+from attestory.engine import (
+    ATTESTORY_DIR,
+    artifact_key,
+    commit_file,
+    commits_for_artifact,
+    diff_file_snapshots,
+)
 
 SUPPORTED_EXTENSIONS = {".xlsx", ".pptx", ".html", ".csv"}
 
@@ -41,6 +47,12 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="No Attestory history found.")
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def resolve_artifact_key(filename: str) -> str:
+        try:
+            return artifact_key(workspace, Path(filename))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "version": __version__}
@@ -71,6 +83,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         content_type = request.headers.get("content-type", "")
         staged_dir: Path | None = None
         target_file: Path
+        artifact_path: str | None = None
         message = ""
         try:
             if content_type.startswith("multipart/form-data"):
@@ -93,6 +106,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                     )
                     staged_dir.mkdir(parents=True, exist_ok=False)
                     target_file = staged_dir / filename
+                    artifact_path = filename
                     target_file.write_bytes(await upload.read())
                 elif file_path:
                     target_file = resolve_workspace_file(str(file_path))
@@ -115,7 +129,12 @@ def create_app(root: Path | None = None) -> FastAPI:
                 message = str(body.get("message", ""))
                 target_file = resolve_workspace_file(str(file_path))
 
-            result = commit_file(workspace, target_file, message=message)
+            result = commit_file(
+                workspace,
+                target_file,
+                message=message,
+                artifact_path=artifact_path,
+            )
         except HTTPException:
             raise
         except (ValueError, json.JSONDecodeError) as error:
@@ -135,31 +154,32 @@ def create_app(root: Path | None = None) -> FastAPI:
             "rule_violations": record["rule_violations"],
         }
 
-    @app.get("/v1/diff/{filename}")
+    @app.get("/v1/diff/{filename:path}")
     async def diff(filename: str) -> dict:
         history = load_history()
-        commits = [item for item in history["commits"] if item["file"] == filename]
+        key = resolve_artifact_key(filename)
+        commits = commits_for_artifact(history, key)
         if len(commits) < 2:
             raise HTTPException(
                 status_code=404,
-                detail=f"At least two versions of {filename} are required.",
+                detail=f"At least two versions of {key} are required.",
             )
         report = diff_file_snapshots(
             workspace / commits[-2]["snapshot"],
             workspace / commits[-1]["snapshot"],
-            filename,
+            key,
         )
         return {
-            "file": filename,
+            "file": key,
             "from_version": commits[-2]["version"],
             "to_version": commits[-1]["version"],
             **report,
         }
 
-    @app.post("/v1/report/{filename}")
+    @app.post("/v1/report/{filename:path}")
     async def report(filename: str) -> dict:
         try:
-            return generate_report(workspace, filename)
+            return generate_report(workspace, resolve_artifact_key(filename))
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
