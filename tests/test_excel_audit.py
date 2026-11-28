@@ -21,6 +21,31 @@ from attestory.signing import load_public_key, verify_audit
 runner = CliRunner()
 
 
+def _build_labeled_workbook(path: Path, variant: str) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Revenue"
+    ws["B2"] = 200000
+    ws["B3"] = 212000
+    if variant == "row_inserted":
+        ws.insert_rows(3)
+        ws["B5"] = "=SUM(B2:B3)"
+        wb.defined_names.add(DefinedName("ForecastTotal", attr_text="Revenue!$B$5"))
+    elif variant == "hardcoded":
+        ws["B4"] = 412000
+        wb.defined_names.add(DefinedName("ForecastTotal", attr_text="Revenue!$B$4"))
+    elif variant == "uncached":
+        ws["B4"] = "=SUM(B2:B3)"
+        wb.defined_names.add(DefinedName("ForecastTotal", attr_text="Revenue!$B$4"))
+    elif variant == "external":
+        ws["B4"] = "='[Budget.xlsx]Revenue'!B4"
+        wb.defined_names.add(DefinedName("ForecastTotal", attr_text="Revenue!$B$4"))
+    else:
+        ws["B4"] = "=SUM(B2:B3)"
+        wb.defined_names.add(DefinedName("ForecastTotal", attr_text="Revenue!$B$4"))
+    wb.save(path)
+
+
 def _build_sample_workbook(
     path: Path, overwrite_total_with_hardcode: bool = False
 ) -> None:
@@ -854,6 +879,51 @@ def test_failed_check_keeps_incomplete_findings_across_interfaces(
     assert report_payload["status"] == "FAIL"
     assert report_payload["incomplete_findings"]
     assert "FAIL" in receipt and "Incomplete checks" in receipt
+
+
+def test_labeled_excel_verification_corpus(tmp_path: Path, monkeypatch):
+    cases_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "excel_verification"
+        / "cases.yaml"
+    )
+    cases = yaml.safe_load(cases_path.read_text(encoding="utf-8"))["cases"]
+
+    for case in cases:
+        case_dir = tmp_path / case["id"]
+        case_dir.mkdir()
+        init_workspace(case_dir)
+        workbook = case_dir / "Model.xlsx"
+        rules_path = case_dir / ".attestory" / "rules.yaml"
+        rules_path.write_text(
+            yaml.safe_dump(case["rules"], sort_keys=False),
+            encoding="utf-8",
+        )
+        _build_labeled_workbook(workbook, case["baseline"])
+        commit_file(case_dir, workbook)
+        _build_labeled_workbook(workbook, case["candidate"])
+        committed = commit_file(case_dir, workbook)
+        record = committed["record"]
+
+        finding_kinds = {finding["kind"] for finding in record["findings"]}
+        finding_rules = {
+            finding["rule"] for finding in record["incomplete_findings"]
+        }
+        assert record["required_checks"]
+        assert record["audit_manifest"]["required_checks"] == record["required_checks"]
+
+        if "formula_deletion" == case["id"]:
+            assert record["outcome"] == "FAIL"
+            assert "hardcode_override" in finding_kinds
+        elif "missing_formula_cache" == case["id"]:
+            assert record["outcome"] == "INCOMPLETE"
+            assert "formula_cache" in finding_rules
+        elif "unresolved_external_reference" == case["id"]:
+            assert record["outcome"] == "INCOMPLETE"
+            assert "external_reference" in finding_rules
+        else:
+            assert record["outcome"] in {"PASS", "FAIL"}
 
 
 def test_cli_end_to_end(tmp_path: Path, monkeypatch):

@@ -1,0 +1,46 @@
+cases:
+  - id: row_insertion_named_range
+    description: Inserting a row changes the named range target without changing the formula.
+    baseline: formula
+    candidate: row_inserted
+    rules:
+      must_be_formula:
+        - ForecastTotal
+    expected_outcome: PASS
+    expected_findings:
+      - formula_change
+
+  - id: formula_deletion
+    description: Replacing a required formula with a hardcoded value.
+    baseline: formula
+    candidate: hardcoded
+    rules:
+      must_be_formula:
+        - ForecastTotal
+    expected_outcome: FAIL
+    expected_findings:
+      - hardcode_override
+
+  - id: missing_formula_cache
+    description: A required numeric assertion depends on an unresolved formula cache.
+    baseline: uncached
+    candidate: uncached
+    rules:
+      assertions:
+        - location: Revenue!B4
+          equals: 412000
+    expected_outcome: INCOMPLETE
+    expected_findings:
+      - formula_cache
+
+  - id: unresolved_external_reference
+    description: A formula contains an unresolved external workbook reference.
+    baseline: external
+    candidate: external
+    rules:
+      assertions:
+        - location: Revenue!B4
+          equals: 412000
+    expected_outcome: INCOMPLETE
+    expected_findings:
+      - external_reference

@@ -274,8 +274,16 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
     rows = []
     errors = []
     formula_cache_warnings = []
+    unresolved_external_references = []
     sheet_names = list(wb_formulas.sheetnames)
     stored_cells = _stored_cell_ids(xlsx_path)
+    external_link_parts = []
+    with ZipFile(xlsx_path) as workbook:
+        external_link_parts = [
+            name
+            for name in workbook.namelist()
+            if name.startswith("xl/externalLinks/")
+        ]
 
     named_ranges: dict[str, dict] = {}
     for name, defined_name in wb_formulas.defined_names.items():
@@ -327,6 +335,19 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
                 formula_str = raw_f if is_formula else ""
                 norm_formula = normalize_formula(raw_f) or ""
                 val_str = "" if raw_v is None else str(raw_v)
+
+                if is_formula and ("[" in formula_str or external_link_parts):
+                    unresolved_external_references.append(
+                        {
+                            "location": f"{sheet_name}!{cell_id}",
+                            "formula": formula_str,
+                            "reason": (
+                                "Formula contains an external workbook reference."
+                                if "[" in formula_str
+                                else "Workbook contains external link parts."
+                            ),
+                        }
+                    )
 
                 if is_formula and raw_v is None:
                     formula_cache_warnings.append(
@@ -393,4 +414,6 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
         "populated_cells": len(rows),
         "errors": errors,
         "formula_cache_warnings": formula_cache_warnings,
+        "external_references": len(unresolved_external_references),
+        "unresolved_external_references": unresolved_external_references,
     }

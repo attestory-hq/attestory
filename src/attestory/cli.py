@@ -870,6 +870,7 @@ def generate_report(
     formula_errors = latest.get("stats", {}).get("errors", [])
     violations = latest.get("rule_violations", [])
     incomplete_findings = latest.get("incomplete_findings", [])
+    required_checks = latest.get("required_checks", [])
     review_needed = bool(
         latest.get("stats", {}).get("errors")
         or formula_cache_warnings(latest.get("stats", {}))
@@ -1005,6 +1006,13 @@ def generate_report(
         f"{escape(item['location'])}: {escape(item['reason'])}</li>"
         for item in incomplete_findings
     )
+    required_check_html = "".join(
+        "<li><strong>"
+        f"{escape(item['check'])}</strong> — {escape(item['status'])}"
+        f" at {escape(item['location'])}"
+        f"{': ' + escape(item['reason']) if item.get('reason') else ''}</li>"
+        for item in required_checks
+    )
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Attestory Receipt — {escape(latest["file"])} v{latest["version"]}</title>
@@ -1044,6 +1052,7 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
 <div class="card"><span>External References</span><strong>{latest.get("stats", {}).get("external_references", 0)}</strong></div></section>
 {"<section class='card violations'><strong>Rule violations</strong><ul>" + violation_html + "</ul></section>" if violations else ""}
 {"<section class='card'><strong>Incomplete checks</strong><ul>" + incomplete_html + "</ul></section>" if incomplete_html else ""}
+{"<section class='card'><strong>Required check execution</strong><ul>" + required_check_html + "</ul></section>" if required_check_html else ""}
 {"<section class='card violations'><strong>Formula cache warnings</strong><ul>" + formula_cache_html + "</ul></section>" if formula_cache_html else ""}
 {"<section class='card violations'><strong>Excel formula errors</strong><ul>" + formula_error_html + "</ul></section>" if formula_error_html else ""}
 <section class="diff"><table><thead><tr><th>Element</th><th>Previous</th><th>Current</th><th>Numeric delta</th><th>Change type</th></tr></thead>
@@ -1090,6 +1099,7 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
             "signature_key_status": verification["key_status"],
             "workbook_match": verification["workbook_match"],
             "audit_outcome": status,
+            "required_checks": required_checks,
         },
     }
 

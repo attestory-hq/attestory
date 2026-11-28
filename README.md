@@ -199,6 +199,27 @@ workbook remains byte-for-byte unchanged. When recalculation succeeds, the
 recalculated copy supplies the audit snapshot and its changed cached values are
 recorded. If recalculation fails, required checks are marked incomplete.
 
+### Excel verification coverage
+
+Supported checks include formula presence, numeric assertions, named-range
+resolution, hardcoded formula overrides, formula edits/deletions, formula-cache
+warnings, Excel formula errors, and row/cell diffs. Named ranges are supported
+only when they resolve to one worksheet cell in the captured workbook; ambiguous
+or unsupported ranges are recorded as skipped required checks.
+
+Coverage boundaries: Attestory does not execute spreadsheet macros or external
+workbook recalculation. External formulas and external-link parts are listed
+separately as unresolved external references. Formula assertions that depend on
+a missing cached value or unresolved external input are `INCOMPLETE`, not PASS.
+Required baseline, formula, numeric, cross-file, recalculation, cache, and
+external-reference checks are recorded in each manifest and receipt with
+`executed`, `failed`, `skipped`, or `unsupported` status and an explanatory reason.
+
+The labeled regression corpus is under
+`tests/fixtures/excel_verification/cases.yaml`; it covers row insertion with
+named ranges, formula deletion, missing formula caches, and unresolved external
+references. These cases run in the pytest CI matrix for Python 3.11 and 3.12.
+
 Audit manifests use canonical JSON serialization (`sort_keys=True`, compact UTF-8
 JSON, no whitespace) and Ed25519 signatures. Each workspace keypair is stored under
 `.attestory/signing/`; the private key is excluded from source control and the public
