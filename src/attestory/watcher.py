@@ -3,6 +3,7 @@
 import json
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -30,23 +31,40 @@ def is_ignored_path(path: Path) -> bool:
     return path.suffix.lower() not in SUPPORTED_EXTENSIONS
 
 
-def snapshot_if_changed(root: Path, path: Path) -> dict | None:
+def snapshot_if_changed(
+    root: Path,
+    path: Path,
+    retry_attempts: int = 3,
+    retry_delay: float = 0.1,
+) -> dict | None:
     """Snapshot a supported file unless its content matches the latest commit."""
     root = root.resolve()
     path = path.resolve()
     if is_ignored_path(path) or not path.is_file():
         return None
 
-    manifest_path = root / ATTESTORY_DIR / "history.json"
-    if manifest_path.exists():
-        history = json.loads(manifest_path.read_text(encoding="utf-8"))
-        commits = commits_for_artifact(
-            history, artifact_key(root, path), include_legacy=False
-        )
-        if commits and commits[-1]["sha256"] == sha256_file(path):
-            return None
+    last_error: Exception | None = None
+    attempts = max(1, retry_attempts)
+    for attempt in range(attempts):
+        try:
+            manifest_path = root / ATTESTORY_DIR / "history.json"
+            if manifest_path.exists():
+                history = json.loads(manifest_path.read_text(encoding="utf-8"))
+                commits = commits_for_artifact(
+                    history, artifact_key(root, path), include_legacy=False
+                )
+                if commits and commits[-1]["sha256"] == sha256_file(path):
+                    return None
 
-    return commit_file(root, path, message="Auto-snapshot on file save")
+            return commit_file(root, path, message="Auto-snapshot on file save")
+        except Exception as error:  # noqa: BLE001 - async read failures are reported after bounded retries
+            last_error = error
+            if attempt + 1 < attempts:
+                time.sleep(retry_delay * (2**attempt))
+
+    if last_error is not None:
+        raise last_error
+    return None
 
 
 class SnapshotEventHandler(FileSystemEventHandler):
@@ -58,12 +76,16 @@ class SnapshotEventHandler(FileSystemEventHandler):
         debounce: float = 2.0,
         on_commit: Callable[[dict], None] | None = None,
         on_error: Callable[[Path, Exception], None] | None = None,
+        retry_attempts: int = 3,
+        retry_delay: float = 0.1,
     ):
         super().__init__()
         self.root = root.resolve()
         self.debounce = debounce
         self.on_commit = on_commit or self._print_receipt
         self.on_error = on_error or self._print_error
+        self.retry_attempts = retry_attempts
+        self.retry_delay = retry_delay
         self._timers: dict[Path, threading.Timer] = {}
         self._tokens: dict[Path, int] = {}
         self._lock = threading.Lock()
@@ -75,6 +97,19 @@ class SnapshotEventHandler(FileSystemEventHandler):
 
     def on_modified(self, event: FileSystemEvent) -> None:
         self._handle_event(event)
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        destination = getattr(event, "dest_path", None)
+        if destination is None:
+            return
+        path = Path(destination).resolve()
+        if not path.is_relative_to(self.root):
+            return
+        if is_ignored_path(path):
+            return
+        self._schedule(path)
 
     def _handle_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -108,7 +143,12 @@ class SnapshotEventHandler(FileSystemEventHandler):
                 with self._lock:
                     if self._closed:
                         return
-                result = snapshot_if_changed(self.root, path)
+                result = snapshot_if_changed(
+                    self.root,
+                    path,
+                    retry_attempts=self.retry_attempts,
+                    retry_delay=self.retry_delay,
+                )
             if result is not None:
                 self.on_commit(result)
         except Exception as error:  # noqa: BLE001 - async failures must reach on_error
@@ -145,10 +185,17 @@ def run_watcher(
     debounce: float = 2.0,
     on_commit: Callable[[dict], None] | None = None,
     on_error: Callable[[Path, Exception], None] | None = None,
+    retry_attempts: int = 3,
+    retry_delay: float = 0.1,
 ) -> None:
     """Watch a workspace until interrupted, debouncing saves before snapshotting."""
     handler = SnapshotEventHandler(
-        root, debounce=debounce, on_commit=on_commit, on_error=on_error
+        root,
+        debounce=debounce,
+        on_commit=on_commit,
+        on_error=on_error,
+        retry_attempts=retry_attempts,
+        retry_delay=retry_delay,
     )
     observer = Observer()
     observer.schedule(handler, str(root.resolve()), recursive=recursive)
