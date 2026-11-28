@@ -151,6 +151,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             "sha256": record["sha256"],
             "diff_summary": record["diff_summary"],
             "hardcode_overrides": diff.get("hardcode_overrides", []),
+            "formula_changes": diff.get("formula_changes", []),
+            "formula_to_blanks": diff.get("formula_to_blanks", []),
+            "missing_formula_cells": diff.get("missing_formula_cells", []),
             "rule_violations": record["rule_violations"],
         }
 

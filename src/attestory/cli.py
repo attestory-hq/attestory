@@ -33,6 +33,9 @@ console = Console()
 def machine_output(
     *,
     hardcoded_regressions: list[dict] | None = None,
+    formula_changes: list[dict] | None = None,
+    formula_to_blanks: list[dict] | None = None,
+    missing_formula_cells: list[dict] | None = None,
     formula_errors: list[dict] | None = None,
     rule_violations: list[dict] | None = None,
     incomplete_findings: list[dict] | None = None,
@@ -41,6 +44,9 @@ def machine_output(
     """Build the stable JSON shape shared by machine-readable commands."""
     return AuditResult.from_findings(
         hardcoded_regressions=hardcoded_regressions,
+        formula_changes=formula_changes,
+        formula_to_blanks=formula_to_blanks,
+        missing_formula_cells=missing_formula_cells,
         formula_errors=formula_errors,
         rule_violations=rule_violations,
         incomplete_findings=incomplete_findings,
@@ -181,6 +187,9 @@ def status(
         violations = []
         incomplete_findings = []
         hardcodes = []
+        formula_changes = []
+        formula_to_blanks = []
+        missing_formula_cells = []
         identity_warnings = []
         for identity, commit in latest_by_file.items():
             formula_errors.extend(commit.get("stats", {}).get("errors", []))
@@ -203,17 +212,28 @@ def status(
                     commit["file"],
                 )
                 hardcodes.extend(diff.get("hardcode_overrides", []))
+                formula_changes.extend(diff.get("formula_changes", []))
+                formula_to_blanks.extend(diff.get("formula_to_blanks", []))
+                missing_formula_cells.extend(diff.get("missing_formula_cells", []))
         violations.extend(identity_warnings)
         output = machine_output(
             hardcoded_regressions=hardcodes,
+            formula_changes=formula_changes,
+            formula_to_blanks=formula_to_blanks,
+            missing_formula_cells=missing_formula_cells,
             formula_errors=formula_errors,
             rule_violations=violations,
             incomplete_findings=incomplete_findings,
             summary_stats={
                 "tracked_files": len(latest_by_file),
+                "formula_changes": len(formula_changes),
+                "formula_to_blanks": len(formula_to_blanks),
+                "missing_formula_cells": len(missing_formula_cells),
                 "open_issues": sum(
                     len(commit.get("rule_violations", []))
                     + len(commit.get("stats", {}).get("errors", []))
+                    + commit.get("diff_summary", {}).get("formula_to_blanks", 0)
+                    + commit.get("diff_summary", {}).get("missing_formula_cells", 0)
                     for commit in latest_by_file.values()
                 )
                 + len(identity_warnings),
@@ -393,12 +413,18 @@ def commit(
 
     if json_output:
         hardcodes = diff.get("hardcode_overrides", []) if diff else []
+        formula_changes = diff.get("formula_changes", []) if diff else []
+        formula_to_blanks = diff.get("formula_to_blanks", []) if diff else []
+        missing_formula_cells = diff.get("missing_formula_cells", []) if diff else []
         formula_errors = (
             rec["stats"].get("errors", []) if file.suffix.lower() == ".xlsx" else []
         )
         violations = rec["rule_violations"]
         output = machine_output(
             hardcoded_regressions=hardcodes,
+            formula_changes=formula_changes,
+            formula_to_blanks=formula_to_blanks,
+            missing_formula_cells=missing_formula_cells,
             formula_errors=formula_errors,
             rule_violations=violations,
             incomplete_findings=rec.get("incomplete_findings", []),
@@ -406,9 +432,9 @@ def commit(
                 "total_changes": diff["total_changes"] if diff else 0,
                 "hardcode_overrides": len(hardcodes),
                 "formula_cache_warnings": len(formula_cache_warnings(rec["stats"])),
-                "formula_changes": len(diff["formula_changes"])
-                if diff and "formula_changes" in diff
-                else 0,
+                "formula_changes": len(formula_changes),
+                "formula_to_blanks": len(formula_to_blanks),
+                "missing_formula_cells": len(missing_formula_cells),
                 "value_changes": len(diff["value_changes"])
                 if diff and "value_changes" in diff
                 else 0,
@@ -481,7 +507,10 @@ def commit(
             summary_lines.append(
                 f"[bold]Changes vs v{rec['version'] - 1}:[/bold] {diff['total_changes']} total "
                 f"([red]{len(diff['hardcode_overrides'])} hardcode overrides[/red], "
-                f"{len(diff['formula_changes'])} formula edits, {len(diff['value_changes'])} value updates)"
+                f"{len(diff['formula_changes'])} formula edits, "
+                f"{len(diff['formula_to_blanks'])} formulas cleared, "
+                f"{len(diff['missing_formula_cells'])} formula cells removed, "
+                f"{len(diff['value_changes'])} value updates)"
             )
         elif extension == ".pptx":
             summary_lines.append(
@@ -511,6 +540,16 @@ def commit(
             table.add_row(
                 item["location"], item["old_formula"], item["new_hardcoded_val"]
             )
+        console.print(table)
+    if diff and (diff.get("formula_to_blanks") or diff.get("missing_formula_cells")):
+        table = Table(title="FORMULA DELETIONS", style="bold red")
+        table.add_column("Location")
+        table.add_column("Previous Formula")
+        table.add_column("Deletion")
+        for item in diff.get("formula_to_blanks", []):
+            table.add_row(item["location"], item["formula"], "Cleared to blank")
+        for item in diff.get("missing_formula_cells", []):
+            table.add_row(item["location"], item["formula"], "Cell removed")
         console.print(table)
     if rec["rule_violations"]:
         table = Table(title="RULE VIOLATIONS", style="bold red")
@@ -607,17 +646,23 @@ def diff(
             else []
         )
         hardcodes = res.get("hardcode_overrides", [])
+        formula_changes = res.get("formula_changes", [])
+        formula_to_blanks = res.get("formula_to_blanks", [])
+        missing_formula_cells = res.get("missing_formula_cells", [])
         output = machine_output(
             hardcoded_regressions=hardcodes,
+            formula_changes=formula_changes,
+            formula_to_blanks=formula_to_blanks,
+            missing_formula_cells=missing_formula_cells,
             formula_errors=formula_errors,
             rule_violations=violations,
             incomplete_findings=latest.get("incomplete_findings", []),
             summary_stats={
                 "total_changes": res["total_changes"],
                 "hardcode_overrides": len(hardcodes),
-                "formula_changes": len(res["formula_changes"])
-                if "formula_changes" in res
-                else 0,
+                "formula_changes": len(formula_changes),
+                "formula_to_blanks": len(formula_to_blanks),
+                "missing_formula_cells": len(missing_formula_cells),
                 "value_changes": len(res["value_changes"])
                 if "value_changes" in res
                 else 0,
@@ -640,6 +685,14 @@ def diff(
         for item in res["formula_changes"]:
             console.print(
                 f"  [yellow]FORMULA[/yellow]  {item['location']}: {item['old_formula']} -> {item['new_formula']}"
+            )
+        for item in res.get("formula_to_blanks", []):
+            console.print(
+                f"  [red]FORMULA CLEARED[/red] {item['location']}: {item['formula']} -> blank"
+            )
+        for item in res.get("missing_formula_cells", []):
+            console.print(
+                f"  [red]FORMULA CELL REMOVED[/red] {item['location']}: {item['formula']}"
             )
         for item in res["value_changes"][:20]:
             console.print(
@@ -693,12 +746,17 @@ def generate_report(root: Path, filename: str) -> dict:
     )
     hardcodes = len(diff.get("hardcode_overrides", [])) if diff else 0
     formulas = len(diff.get("formula_changes", [])) if diff else 0
+    formula_to_blanks = len(diff.get("formula_to_blanks", [])) if diff else 0
+    missing_formula_cells = len(diff.get("missing_formula_cells", [])) if diff else 0
+    formula_errors = latest.get("stats", {}).get("errors", [])
     violations = latest.get("rule_violations", [])
     incomplete_findings = latest.get("incomplete_findings", [])
     review_needed = bool(
         latest.get("stats", {}).get("errors")
         or formula_cache_warnings(latest.get("stats", {}))
         or hardcodes
+        or formula_to_blanks
+        or missing_formula_cells
         or violations
         or latest.get("stats", {}).get("external_references")
         or latest.get("identity_ambiguous")
@@ -708,7 +766,11 @@ def generate_report(root: Path, filename: str) -> dict:
     if status is None:
         status = (
             "FAIL"
-            if latest.get("stats", {}).get("errors") or violations or hardcodes
+            if latest.get("stats", {}).get("errors")
+            or violations
+            or hardcodes
+            or formula_to_blanks
+            or missing_formula_cells
             else "INCOMPLETE"
             if (
                 incomplete_findings
@@ -755,6 +817,8 @@ def generate_report(root: Path, filename: str) -> dict:
         for category, entries in (
             ("Hardcode override", diff["hardcode_overrides"]),
             ("Formula edit", diff["formula_changes"]),
+            ("Formula cleared", diff.get("formula_to_blanks", [])),
+            ("Formula cell removed", diff.get("missing_formula_cells", [])),
             ("Value update", diff["value_changes"]),
         ):
             for change in entries:
@@ -764,7 +828,11 @@ def generate_report(root: Path, filename: str) -> dict:
                         change.get("old_val", change.get("old_formula", "")),
                         change.get(
                             "new_val",
-                            change.get(
+                            "blank"
+                            if category == "Formula cleared"
+                            else "cell removed"
+                            if category == "Formula cell removed"
+                            else change.get(
                                 "new_hardcoded_val", change.get("new_formula", "")
                             ),
                         ),
@@ -778,6 +846,8 @@ def generate_report(root: Path, filename: str) -> dict:
         category_class = {
             "hardcode override": "hardcode",
             "formula edit": "formula",
+            "formula cleared": "deletion",
+            "formula cell removed": "deletion",
             "value update": "value",
             "text": "text",
             "table": "table",
@@ -805,6 +875,12 @@ def generate_report(root: Path, filename: str) -> dict:
         "Recalculate the workbook in Excel/LibreOffice.</li>"
         for item in formula_cache_warnings(latest.get("stats", {}))
     )
+    formula_error_html = "".join(
+        f"<li><strong>{escape(item['error'])}</strong> — "
+        f"{escape(item['location'])}"
+        f"{': ' + escape(item['formula']) if item.get('formula') else ''}</li>"
+        for item in formula_errors
+    )
     incomplete_html = "".join(
         f"<li><strong>{escape(item['rule'])}</strong> — "
         f"{escape(item['location'])}: {escape(item['reason'])}</li>"
@@ -822,7 +898,7 @@ header{{padding:26px;margin-bottom:18px}}h1{{margin:0 0 8px;font-size:25px}}p,.m
 .meta{{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:18px}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}}
 .card{{padding:18px}}.card span{{display:block;color:var(--muted);font-size:13px}}.card strong{{font-size:26px}}
 .diff{{overflow:hidden}}table{{border-collapse:collapse;width:100%;font-size:14px}}th,td{{padding:12px 14px;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}}
-th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)}}tbody tr:nth-child(even){{background:color-mix(in srgb,var(--accent) 4%,var(--card))}}.change-hardcode td:last-child{{color:#b42318;font-weight:700}}.change-formula td:last-child{{color:#b54708;font-weight:700}}.change-value td:last-child,.change-chart td:last-child{{color:#067647;font-weight:700}}.change-text td:last-child,.change-table td:last-child{{color:var(--accent);font-weight:700}}.empty{{text-align:center;color:var(--muted);padding:30px}}.violations{{color:#b42318}}
+th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)}}tbody tr:nth-child(even){{background:color-mix(in srgb,var(--accent) 4%,var(--card))}}.change-hardcode td:last-child,.change-deletion td:last-child{{color:#b42318;font-weight:700}}.change-formula td:last-child{{color:#b54708;font-weight:700}}.change-value td:last-child,.change-chart td:last-child{{color:#067647;font-weight:700}}.change-text td:last-child,.change-table td:last-child{{color:var(--accent);font-weight:700}}.empty{{text-align:center;color:var(--muted);padding:30px}}.violations{{color:#b42318}}
 @media print{{:root{{color-scheme:light}}body{{background:white}}main{{margin:0 auto}}}}
 </style></head><body><main>
 <header><span class="badge">{status}</span><h1>Attestory Receipt</h1><div>{escape(latest["file"])} · Version {latest["version"]}</div>
@@ -832,12 +908,16 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
 <section class="cards"><div class="card"><span>Total Changes</span><strong>{total_changes}</strong></div>
 <div class="card"><span>Hardcode Overrides</span><strong>{hardcodes}</strong></div>
 <div class="card"><span>Formula Edits</span><strong>{formulas}</strong></div>
+<div class="card"><span>Formulas Cleared</span><strong>{formula_to_blanks}</strong></div>
+<div class="card"><span>Formula Cells Removed</span><strong>{missing_formula_cells}</strong></div>
+<div class="card"><span>Formula Errors</span><strong>{len(formula_errors)}</strong></div>
 <div class="card"><span>Rule Violations</span><strong>{len(violations)}</strong></div>
 <div class="card"><span>Formula Cache Warnings</span><strong>{len(formula_cache_warnings(latest.get("stats", {})))}</strong></div>
 <div class="card"><span>External References</span><strong>{latest.get("stats", {}).get("external_references", 0)}</strong></div></section>
 {"<section class='card violations'><strong>Rule violations</strong><ul>" + violation_html + "</ul></section>" if violations else ""}
 {"<section class='card'><strong>Incomplete checks</strong><ul>" + incomplete_html + "</ul></section>" if incomplete_html else ""}
 {"<section class='card violations'><strong>Formula cache warnings</strong><ul>" + formula_cache_html + "</ul></section>" if formula_cache_html else ""}
+{"<section class='card violations'><strong>Excel formula errors</strong><ul>" + formula_error_html + "</ul></section>" if formula_error_html else ""}
 <section class="diff"><table><thead><tr><th>Element</th><th>Previous</th><th>Current</th><th>Numeric delta</th><th>Change type</th></tr></thead>
 <tbody>{row_html}</tbody></table></section>
 </main></body></html>"""
@@ -867,6 +947,9 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
             "total_changes": total_changes,
             "hardcode_overrides": hardcodes,
             "formula_changes": formulas,
+            "formula_to_blanks": formula_to_blanks,
+            "missing_formula_cells": missing_formula_cells,
+            "formula_errors": len(formula_errors),
             "rule_violations": len(violations),
             "incomplete_findings": len(incomplete_findings),
             "formula_cache_warnings": len(
@@ -933,8 +1016,14 @@ def report(
             else None
         )
         hardcodes = diff.get("hardcode_overrides", []) if diff else []
+        formula_changes = diff.get("formula_changes", []) if diff else []
+        formula_to_blanks = diff.get("formula_to_blanks", []) if diff else []
+        missing_formula_cells = diff.get("missing_formula_cells", []) if diff else []
         output = machine_output(
             hardcoded_regressions=hardcodes,
+            formula_changes=formula_changes,
+            formula_to_blanks=formula_to_blanks,
+            missing_formula_cells=missing_formula_cells,
             formula_errors=formula_errors,
             rule_violations=violations,
             incomplete_findings=latest.get("incomplete_findings", []),

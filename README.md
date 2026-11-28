@@ -16,7 +16,7 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 **Attestory** creates a lightweight, local-first `.attestory/` audit folder right alongside your spreadsheets:
 - **Zero Cloud Uploads Required:** Structural snapshots are stored locally as Zstandard-compressed **Apache Parquet** files inside `.attestory/`.
 - **Atomic Local Commits:** Workspace commits are serialized locally, snapshots are staged and verified before history publication, and history is replaced atomically with source and snapshot SHA-256 digests.
-- **Deterministic Math & Hardcode Audits:** Uses `openpyxl` and **DuckDB** SQL diffs to catch silent formula-to-hardcode overwrites and Excel formula errors in milliseconds.
+- **Deterministic Math & Formula Audits:** Uses `openpyxl` and **DuckDB** SQL diffs to catch formula-to-hardcode overwrites, formula deletions, changed references, and Excel calculation errors in milliseconds.
 - **PowerPoint Semantic Diffs:** Extracts slide text, native table cells, and embedded chart values into Zstandard-compressed Parquet snapshots, with DuckDB-powered comparisons between versions.
 - **Dashboard & Data Lineage:** Audits HTML dashboard KPIs, table cells, and external telemetry references; fingerprints CSV row counts, schemas, null counts, and numeric summaries.
 - **Persistent Assertions & Receipts:** Configure formula and numeric guardrails in `.attestory/rules.yaml`, then generate self-contained HTML audit receipts.
@@ -115,6 +115,12 @@ exists. A failed check remains `FAIL` even when other checks are incomplete.
 Its `to_dict()` shape matches the compact
 JSON emitted by `attestory commit`, `diff`, `status`, and `report` with
 `--json`.
+
+Excel diffs distinguish formula edits, formula-to-hardcode overrides, formulas
+cleared to blank, and formula cells removed from the worksheet. Formula
+comparison preserves quoted text and significant reference intersections while
+ignoring cosmetic case and whitespace. Excel errors including `#SPILL!` and
+`#CALC!` are included in audit findings.
 
 For Claude Code, install the skill and opt into project-level pre/post hooks
 with `attestory install-skill --target claude-code --hook`. `PreToolUse`

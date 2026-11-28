@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from attestory.cli import app
 from attestory.engine import commit_file, init_workspace
+from attestory.parsers.excel import normalize_formula
 
 runner = CliRunner()
 
@@ -35,6 +36,37 @@ def _build_sample_workbook(
         ws["B4"] = "=SUM(B2:B3)"
 
     wb.save(path)
+
+
+def _build_formula_workbook(path: Path, formula: str) -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    sheet["B2"] = 250
+    sheet["B3"] = 162
+    sheet["B4"] = formula
+    sheet["B4"].number_format = "0.00"
+    workbook.save(path)
+
+
+def _remove_stored_cell(path: Path, cell_id: str) -> None:
+    temp_path = path.with_suffix(".tmp.xlsx")
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for item in source.infolist():
+            contents = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                root = ET.fromstring(contents)
+                for row in root.findall(f".//{namespace}row"):
+                    for cell in row.findall(f"{namespace}c"):
+                        if cell.attrib.get("r") == cell_id:
+                            row.remove(cell)
+                contents = ET.tostring(root, encoding="utf-8")
+            target.writestr(item, contents)
+    temp_path.replace(path)
 
 
 def _set_cached_formula_value(path: Path, value: int) -> None:
@@ -78,6 +110,136 @@ def test_hardcoded_formula_override_detected(tmp_path: Path):
     assert override["location"] == "Revenue!B4"
     assert override["old_formula"] == "=SUM(B2:B3)"
     assert override["new_hardcoded_val"] == "428000"
+
+
+def test_formula_normalization_preserves_literals_and_intersections():
+    assert normalize_formula('=IF(A1="A B",SUM(B2:B3),0)') != normalize_formula(
+        '=IF(A1="AB",SUM(B2:B3),0)'
+    )
+    assert normalize_formula("=SUM(B2:B3)") == normalize_formula(
+        "=sum( B2:B3 )"
+    )
+    assert normalize_formula("=A1:B2 C3:D4") != normalize_formula("=A1:B2+C3:D4")
+
+
+def test_formula_reference_change_is_reported_as_formula_edit(tmp_path: Path):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Revenue.xlsx"
+    _build_formula_workbook(workbook, "=SUM(B2:B3)")
+    commit_file(tmp_path, workbook, message="Baseline")
+
+    _build_formula_workbook(workbook, "=SUM(B2:B2)")
+    result = commit_file(tmp_path, workbook, message="Changed formula reference")
+
+    assert result["diff"]["formula_changes"] == [
+        {
+            "location": "Revenue!B4",
+            "old_formula": "=SUM(B2:B3)",
+            "new_formula": "=SUM(B2:B2)",
+            "old_val": "",
+            "new_val": "",
+        }
+    ]
+
+
+def test_formula_cleared_to_blank_is_reported_and_fails_audit(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Revenue.xlsx"
+    _build_formula_workbook(workbook, "=SUM(B2:B3)")
+    commit_file(tmp_path, workbook, message="Baseline")
+
+    edited = openpyxl.load_workbook(workbook)
+    edited.active["B4"] = None
+    edited.save(workbook)
+    result = runner.invoke(app, ["commit", "Revenue.xlsx", "--json"])
+    payload = json.loads(result.stdout)
+
+    assert result.exit_code == 1
+    assert payload["status"] == "FAIL"
+    assert payload["formula_to_blanks"] == [
+        {
+            "location": "Revenue!B4",
+            "formula": "=SUM(B2:B3)",
+            "old_val": "",
+        }
+    ]
+    report = runner.invoke(app, ["report", "Revenue.xlsx", "--json"])
+    report_payload = json.loads(report.stdout)
+    receipt = (
+        tmp_path / ".attestory" / "reports" / "Revenue_v2_receipt.html"
+    ).read_text(
+        encoding="utf-8"
+    )
+    assert report_payload["status"] == "FAIL"
+    assert report_payload["formula_to_blanks"] == payload["formula_to_blanks"]
+    assert "Formula cleared" in receipt
+
+
+def test_missing_formula_cell_is_reported_separately(tmp_path: Path):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Revenue.xlsx"
+    _build_formula_workbook(workbook, "=SUM(B2:B3)")
+    commit_file(tmp_path, workbook, message="Baseline")
+    _remove_stored_cell(workbook, "B4")
+
+    result = commit_file(tmp_path, workbook, message="Removed formula cell")
+
+    assert result["diff"]["formula_to_blanks"] == []
+    assert result["diff"]["missing_formula_cells"] == [
+        {
+            "location": "Revenue!B4",
+            "formula": "=SUM(B2:B3)",
+            "old_val": "",
+        }
+    ]
+    assert result["record"]["audit_status"] == "FAIL"
+
+
+def test_modern_excel_calculation_errors_are_detected(tmp_path: Path):
+    init_workspace(tmp_path)
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = "#SPILL!"
+    workbook.active["A1"].data_type = "e"
+    workbook.active["A2"] = "#CALC!"
+    workbook.active["A2"].data_type = "e"
+    workbook_path = tmp_path / "Errors.xlsx"
+    workbook.save(workbook_path)
+
+    result = commit_file(tmp_path, workbook_path)
+
+    assert {error["error"] for error in result["record"]["stats"]["errors"]} == {
+        "#SPILL!",
+        "#CALC!",
+    }
+    from attestory.cli import generate_report
+
+    receipt = generate_report(tmp_path, "Errors.xlsx")
+    report_html = (tmp_path / receipt["path"]).read_text(encoding="utf-8")
+    assert "#SPILL!" in report_html
+    assert "#CALC!" in report_html
+
+
+def test_uncached_formula_cannot_pass_numeric_assertion(tmp_path: Path):
+    init_workspace(tmp_path)
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "assertions:\n  - location: Revenue!B4\n    equals: 412\n",
+        encoding="utf-8",
+    )
+    workbook = tmp_path / "Revenue.xlsx"
+    _build_formula_workbook(workbook, "=SUM(B2:B3)")
+
+    result = commit_file(tmp_path, workbook)
+
+    assert result["record"]["rule_violations"] == []
+    assert any(
+        finding["rule"] == "numeric_assertion"
+        and finding["location"] == "Revenue!B4"
+        for finding in result["record"]["incomplete_findings"]
+    )
+    assert result["record"]["audit_status"] == "INCOMPLETE"
 
 
 def test_uncached_formula_is_flagged_in_commit_and_html_receipt(
