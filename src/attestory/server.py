@@ -101,7 +101,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/v1/excel/edit-verify")
     async def edit_verify_excel(
         request: Request,
-        original_file: UploadFile = File(...),
+        original_file: UploadFile | None = File(None),
         candidate_file: UploadFile = File(...),
         confirm_backend_processing: bool = Form(...),
     ) -> dict[str, Any]:
@@ -111,21 +111,30 @@ def create_app(root: Path | None = None) -> FastAPI:
                 detail="Confirm backend processing before uploading workbooks.",
             )
 
-        original_name = Path(original_file.filename or "").name
         candidate_name = Path(candidate_file.filename or "").name
         if (
-            Path(original_name).suffix.lower() != ".xlsx"
+            (
+                original_file is not None
+                and Path(original_file.filename or "").suffix.lower() != ".xlsx"
+            )
             or Path(candidate_name).suffix.lower() != ".xlsx"
         ):
             raise HTTPException(
                 status_code=400,
-                detail="Both original_file and candidate_file must be XLSX files.",
+                detail="Provided files must be XLSX files.",
             )
 
-        original_bytes = await original_file.read(MAX_EXCEL_ACTION_UPLOAD_BYTES + 1)
+        original_bytes = (
+            await original_file.read(MAX_EXCEL_ACTION_UPLOAD_BYTES + 1)
+            if original_file is not None
+            else None
+        )
         candidate_bytes = await candidate_file.read(MAX_EXCEL_ACTION_UPLOAD_BYTES + 1)
         if (
-            len(original_bytes) > MAX_EXCEL_ACTION_UPLOAD_BYTES
+            (
+                original_bytes is not None
+                and len(original_bytes) > MAX_EXCEL_ACTION_UPLOAD_BYTES
+            )
             or len(candidate_bytes) > MAX_EXCEL_ACTION_UPLOAD_BYTES
         ):
             raise HTTPException(

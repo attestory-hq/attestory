@@ -28,6 +28,8 @@ user explicitly consents. Each file is limited to 25 MiB. The response is
 the cell-level findings and explain any `incomplete_findings`. The generated
 fallback receipt for an unavailable audit is explicitly labeled
 `INCOMPLETE` and is not a signed workspace report.
+The original upload may be omitted only to exercise the missing-baseline case;
+the candidate-only request returns `INCOMPLETE`.
 
 ## Configure a GPT Action
 
