@@ -15,6 +15,7 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 
 **Attestory** creates a lightweight, local-first `.attestory/` audit folder right alongside your spreadsheets:
 - **Zero Cloud Uploads Required:** Structural snapshots are stored locally as Zstandard-compressed **Apache Parquet** files inside `.attestory/`.
+- **Atomic Local Commits:** Workspace commits are serialized locally, snapshots are staged and verified before history publication, and history is replaced atomically with source and snapshot SHA-256 digests.
 - **Deterministic Math & Hardcode Audits:** Uses `openpyxl` and **DuckDB** SQL diffs to catch silent formula-to-hardcode overwrites and Excel formula errors in milliseconds.
 - **PowerPoint Semantic Diffs:** Extracts slide text, native table cells, and embedded chart values into Zstandard-compressed Parquet snapshots, with DuckDB-powered comparisons between versions.
 - **Dashboard & Data Lineage:** Audits HTML dashboard KPIs, table cells, and external telemetry references; fingerprints CSV row counts, schemas, null counts, and numeric summaries.

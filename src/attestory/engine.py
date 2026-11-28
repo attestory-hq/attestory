@@ -1,5 +1,10 @@
 import hashlib
 import json
+import os
+import stat
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +21,79 @@ from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
 from attestory.rules import evaluate_rules
 
 ATTESTORY_DIR = ".attestory"
+
+
+@contextmanager
+def _workspace_lock(meta_dir: Path) -> Iterator[None]:
+    """Serialize local snapshot and history writes across processes."""
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = meta_dir / "commit.lock"
+    with lock_path.open("a+b") as lock_file:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as error:
+            raise RuntimeError(
+                f"Could not acquire Attestory workspace lock at {lock_path}: {error}"
+            ) from error
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write and fsync a sibling temporary file before atomically replacing path."""
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    descriptor = os.open(
+        temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+            if mode is not None:
+                os.chmod(temporary_path, mode)
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _verify_parquet_snapshot(path: Path) -> None:
+    """Read the staged Parquet data so truncated or invalid snapshots are rejected."""
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(
+            "SELECT COUNT(*) FROM read_parquet(?)", [str(path)]
+        ).fetchone()
+    except duckdb.Error as error:
+        raise RuntimeError(
+            f"Staged snapshot is not a complete Parquet file: {path}"
+        ) from error
+    finally:
+        connection.close()
 
 
 def sha256_file(path: Path) -> str:
@@ -57,13 +135,22 @@ def commits_for_artifact(
 
 
 def init_workspace(root: Path) -> Path:
-    """Initialize a local .attestory/ directory with rules.yaml, history.json, and changelog.md."""
+    """Initialize a local .attestory/ directory safely alongside concurrent commits."""
+    root = root.expanduser().resolve()
+    meta_dir = root / ATTESTORY_DIR
+    with _workspace_lock(meta_dir):
+        return _init_workspace_locked(root)
+
+
+def _init_workspace_locked(root: Path) -> Path:
+    """Initialize a workspace while its commit lock is held."""
     meta_dir = root / ATTESTORY_DIR
     (meta_dir / "snapshots").mkdir(parents=True, exist_ok=True)
 
     rules_path = meta_dir / "rules.yaml"
     if not rules_path.exists():
-        rules_path.write_text(
+        _atomic_write_text(
+            rules_path,
             yaml.safe_dump(
                 {
                     "version": 1,
@@ -80,18 +167,15 @@ def init_workspace(root: Path) -> Path:
                 },
                 sort_keys=False,
             ),
-            encoding="utf-8",
         )
 
     manifest_path = meta_dir / "history.json"
     if not manifest_path.exists():
-        manifest_path.write_text(
-            json.dumps({"commits": []}, indent=2), encoding="utf-8"
-        )
+        _atomic_write_text(manifest_path, json.dumps({"commits": []}, indent=2))
 
     changelog_path = meta_dir / "changelog.md"
     if not changelog_path.exists():
-        changelog_path.write_text("# Attestory Changelog\n\n", encoding="utf-8")
+        _atomic_write_text(changelog_path, "# Attestory Changelog\n\n")
 
     return meta_dir
 
@@ -176,6 +260,27 @@ def commit_file(
     recalculate: bool = False,
     artifact_path: str | Path | None = None,
 ) -> dict:
+    """Create and publish one snapshot while holding the workspace commit lock."""
+    root = root.expanduser().resolve()
+    with _workspace_lock(root / ATTESTORY_DIR):
+        _init_workspace_locked(root)
+        return _commit_file_locked(
+            root,
+            target_file,
+            message,
+            recalculate=recalculate,
+            artifact_path=artifact_path,
+        )
+
+
+def _commit_file_locked(
+    root: Path,
+    target_file: Path,
+    message: str = "",
+    *,
+    recalculate: bool = False,
+    artifact_path: str | Path | None = None,
+) -> dict:
     """Create a new Parquet snapshot for target_file, diff against prior version, and append to changelog.md."""
     root = root.expanduser().resolve()
     target_file = target_file.expanduser()
@@ -183,8 +288,6 @@ def commit_file(
         target_file = root / target_file
     target_file = target_file.resolve()
     meta_dir = root / ATTESTORY_DIR
-    if not meta_dir.exists():
-        init_workspace(root)
 
     target_key = (
         Path(str(artifact_path).replace("\\", "/")).as_posix()
@@ -231,7 +334,29 @@ def commit_file(
         ".html": extract_html_to_parquet,
         ".csv": extract_csv_to_parquet,
     }
-    stats = extractors[extension](target_file, curr_pq)
+    staged_pq = meta_dir / "snapshots" / f".attestory-stage-{uuid.uuid4().hex}.parquet"
+    file_hash = sha256_file(target_file)
+    try:
+        stats = extractors[extension](target_file, staged_pq)
+        if sha256_file(target_file) != file_hash:
+            raise RuntimeError(
+                f"Artifact changed while creating its snapshot: {target_key}. "
+                "Retry the commit after the file stops changing."
+            )
+        snapshot_hash = sha256_file(staged_pq)
+        _verify_parquet_snapshot(staged_pq)
+        if sha256_file(staged_pq) != snapshot_hash:
+            raise RuntimeError(
+                f"Staged snapshot changed during verification: {staged_pq}"
+            )
+        with staged_pq.open("rb+") as snapshot_file:
+            os.fsync(snapshot_file.fileno())
+        os.replace(staged_pq, curr_pq)
+        if sha256_file(curr_pq) != snapshot_hash:
+            raise RuntimeError(f"Published snapshot digest mismatch: {curr_pq}")
+    finally:
+        staged_pq.unlink(missing_ok=True)
+
     if recalculation_warnings:
         warnings_by_location = {
             warning["location"]: warning
@@ -241,7 +366,6 @@ def commit_file(
             {warning["location"]: warning for warning in recalculation_warnings}
         )
         stats["formula_cache_warnings"] = list(warnings_by_location.values())
-    file_hash = sha256_file(target_file)
 
     diff_report = None
     if file_commits:
@@ -287,6 +411,7 @@ def commit_file(
         "file": target_key,
         "artifact_key": target_key,
         "sha256": file_hash,
+        "snapshot_sha256": snapshot_hash,
         "timestamp": datetime.now(UTC).isoformat(),
         "message": message or f"Snapshot v{next_ver}",
         "snapshot": str(curr_pq.relative_to(root)),
@@ -305,7 +430,7 @@ def commit_file(
         },
     }
     history["commits"].append(record)
-    manifest_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    _atomic_write_text(manifest_path, json.dumps(history, indent=2))
 
     lines = [
         f"## `{target_key}` — v{next_ver} ({record['timestamp']})",
@@ -370,8 +495,15 @@ def commit_file(
             )
     lines.append("\n")
 
-    with open(meta_dir / "changelog.md", "a", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    changelog_path = meta_dir / "changelog.md"
+    try:
+        changelog = changelog_path.read_text(encoding="utf-8")
+        _atomic_write_text(changelog_path, changelog + "\n".join(lines))
+    except OSError as error:
+        raise RuntimeError(
+            f"Snapshot {target_key} v{next_ver} was committed, but its changelog "
+            f"could not be updated: {error}"
+        ) from error
 
     return {"record": record, "diff": diff_report}
 
@@ -390,15 +522,18 @@ def snapshot_before(root: Path, target_file: Path, message: str = "") -> dict:
     if target_file.suffix.lower() not in {".xlsx", ".pptx", ".html", ".csv"}:
         raise ValueError("Attestory supports .xlsx, .pptx, .html, and .csv files.")
 
-    manifest_path = root / ATTESTORY_DIR / "history.json"
-    if manifest_path.exists():
+    with _workspace_lock(root / ATTESTORY_DIR):
+        _init_workspace_locked(root)
+        manifest_path = root / ATTESTORY_DIR / "history.json"
         history = json.loads(manifest_path.read_text(encoding="utf-8"))
         commits = commits_for_artifact(history, target_key, include_legacy=False)
         if commits and commits[-1].get("sha256") == sha256_file(target_file):
             return {"captured": False, "record": commits[-1], "diff": None}
 
-    result = commit_file(root, target_file, message=message or "Pre-edit baseline")
-    return {"captured": True, **result}
+        result = _commit_file_locked(
+            root, target_file, message=message or "Pre-edit baseline"
+        )
+        return {"captured": True, **result}
 
 
 def workspace_status(root: Path) -> list[dict]:
