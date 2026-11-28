@@ -180,9 +180,18 @@ def create_app(root: Path | None = None) -> FastAPI:
         }
 
     @app.post("/v1/report/{filename:path}")
-    async def report(filename: str) -> dict:
+    async def report(
+        filename: str,
+        version: int | None = None,
+        audit_id: str | None = None,
+    ) -> dict:
         try:
-            return generate_report(workspace, resolve_artifact_key(filename))
+            return generate_report(
+                workspace,
+                resolve_artifact_key(filename),
+                version=version,
+                audit_id=audit_id,
+            )
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 

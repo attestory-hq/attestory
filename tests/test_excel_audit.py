@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import openpyxl
+import yaml
 from openpyxl.workbook.defined_name import DefinedName
 from typer.testing import CliRunner
 
@@ -460,6 +461,57 @@ def test_first_excel_capture_status_matches_cli_and_receipt(
     assert report_payload["status"] == commit_payload["status"]
     assert report_payload["incomplete_findings"] == commit_payload["incomplete_findings"]
     assert "INCOMPLETE" in html and "No prior snapshot exists" in html
+
+
+def test_historical_receipt_is_immutable_across_workbook_and_rule_changes(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    init_workspace(tmp_path)
+    rules_path = tmp_path / ".attestory" / "rules.yaml"
+    workbook = tmp_path / "Model.xlsx"
+
+    wb = openpyxl.Workbook()
+    wb.active["B4"] = 250
+    wb.save(workbook)
+    rules_path.write_text(
+        yaml.safe_dump({"must_be_formula": ["Sheet!B4"]}),
+        encoding="utf-8",
+    )
+    first = commit_file(tmp_path, workbook)
+    first_record = first["record"]
+    assert first_record["manifest_schema_version"] == 1
+    assert first_record["audit_id"].startswith("aud_")
+    assert first_record["baseline_sha256"] is None
+    assert first_record["baseline_snapshot_sha256"] is None
+    assert first_record["candidate_sha256"]
+    assert first_record["candidate_snapshot_sha256"]
+    assert first_record["evaluated_ruleset_digest"]
+    assert first_record["engine_version"]
+    assert first_record["outcome"] == first_record["audit_status"]
+    assert first_record["findings"]
+
+    wb = openpyxl.load_workbook(workbook)
+    wb.active["B4"] = 300
+    wb.save(workbook)
+    rules_path.write_text(
+        yaml.safe_dump({"must_be_formula": ["Sheet!A1"]}),
+        encoding="utf-8",
+    )
+    second = commit_file(tmp_path, workbook)
+    assert second["record"]["baseline_sha256"] == first_record["sha256"]
+    assert (
+        second["record"]["baseline_snapshot_sha256"]
+        == first_record["snapshot_sha256"]
+    )
+
+    result = runner.invoke(app, ["report", "Model.xlsx", "--version", "1", "--json"])
+    assert result.exit_code == 1
+    historical_html = (
+        tmp_path / ".attestory" / "reports" / "Model_v1_receipt.html"
+    ).read_text(encoding="utf-8")
+    assert "missing_baseline" in historical_html
+    assert first_record["audit_id"] in historical_html
 
 
 def test_claude_hooks_capture_excel_before_first_and_repeated_edits(
