@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import posixpath
@@ -94,7 +95,12 @@ def _stored_cell_ids(xlsx_path: Path) -> dict[str, set[str]]:
 
 
 def recalculate_xlsx(xlsx_path: Path) -> list[dict]:
-    """Recalculate an XLSX with LibreOffice and report formula cache values that changed."""
+    """Recalculate a working copy and return formula cache changes."""
+    return recalculate_xlsx_with_metadata(xlsx_path)["changed_cached_values"]
+
+
+def recalculate_xlsx_with_metadata(xlsx_path: Path) -> dict:
+    """Recalculate a temporary copy and return success/failure provenance."""
     soffice = shutil.which("soffice")
     if soffice is None:
         raise RuntimeError(
@@ -102,10 +108,26 @@ def recalculate_xlsx(xlsx_path: Path) -> list[dict]:
             "Install LibreOffice or omit the option."
         )
 
+    submitted_sha256 = hashlib.sha256(xlsx_path.read_bytes()).hexdigest()
     before = _formula_cache_values(xlsx_path)
+    engine_version = "unknown"
+    try:
+        version_result = subprocess.run(
+            [soffice, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        engine_version = (version_result.stdout or version_result.stderr).strip() or "unknown"
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        engine_version = "unknown"
+
     with tempfile.TemporaryDirectory(
         prefix=".attestory-recalc-", dir=xlsx_path.parent
     ) as temp_dir:
+        working_copy = Path(temp_dir) / xlsx_path.name
+        shutil.copy2(xlsx_path, working_copy)
         output_dir = Path(temp_dir) / "output"
         profile_dir = Path(temp_dir) / "profile"
         output_dir.mkdir()
@@ -120,25 +142,43 @@ def recalculate_xlsx(xlsx_path: Path) -> list[dict]:
                     "xlsx",
                     "--outdir",
                     str(output_dir),
-                    str(xlsx_path),
+                    str(working_copy),
                 ],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
             )
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError(
-                "LibreOffice recalculation timed out after 120 seconds."
-            ) from error
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "failed",
+                "submitted_sha256": submitted_sha256,
+                "recalculated_sha256": None,
+                "calculation_engine": "LibreOffice",
+                "calculation_engine_version": engine_version,
+                "changed_cached_values": [],
+                "audit_artifact": "submitted_workbook",
+                "audit_artifact_sha256": submitted_sha256,
+                "error": "LibreOffice recalculation timed out after 120 seconds.",
+            }
 
-        recalculated = output_dir / xlsx_path.name
+        recalculated = output_dir / working_copy.name
         if result.returncode != 0 or not recalculated.is_file():
             detail = (result.stderr or result.stdout).strip()
             message = "LibreOffice failed to recalculate the workbook."
             if detail:
                 message += f" {detail}"
-            raise RuntimeError(message)
+            return {
+                "status": "failed",
+                "submitted_sha256": submitted_sha256,
+                "recalculated_sha256": None,
+                "calculation_engine": "LibreOffice",
+                "calculation_engine_version": engine_version,
+                "changed_cached_values": [],
+                "audit_artifact": "submitted_workbook",
+                "audit_artifact_sha256": submitted_sha256,
+                "error": message,
+            }
 
         after = _formula_cache_values(recalculated)
         warnings = []
@@ -158,8 +198,25 @@ def recalculate_xlsx(xlsx_path: Path) -> list[dict]:
                     "recalculated_value": recalculated_value,
                 }
             )
-        os.replace(recalculated, xlsx_path)
-    return warnings
+        recalculated_sha256 = hashlib.sha256(recalculated.read_bytes()).hexdigest()
+        descriptor, persisted_copy = tempfile.mkstemp(
+            prefix=".attestory-recalculated-", suffix=".xlsx"
+        )
+        os.close(descriptor)
+        persisted_copy = Path(persisted_copy)
+        shutil.copy2(recalculated, persisted_copy)
+        return {
+            "status": "success",
+            "submitted_sha256": submitted_sha256,
+            "recalculated_sha256": recalculated_sha256,
+            "calculation_engine": "LibreOffice",
+            "calculation_engine_version": engine_version,
+            "changed_cached_values": warnings,
+            "audit_artifact": "recalculated_working_copy",
+            "audit_artifact_sha256": recalculated_sha256,
+            "audit_path": persisted_copy,
+            "error": None,
+        }
 
 
 def normalize_formula(formula: str | None) -> str | None:
