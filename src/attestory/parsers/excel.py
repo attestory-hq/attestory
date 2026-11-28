@@ -1,3 +1,4 @@
+import json
 import os
 import posixpath
 import shutil
@@ -219,6 +220,34 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
     sheet_names = list(wb_formulas.sheetnames)
     stored_cells = _stored_cell_ids(xlsx_path)
 
+    named_ranges: dict[str, dict] = {}
+    for name, defined_name in wb_formulas.defined_names.items():
+        try:
+            destinations = list(defined_name.destinations)
+            cells = []
+            for sheet_name, ref in destinations:
+                min_col, min_row, max_col, max_row = openpyxl.utils.range_boundaries(
+                    ref
+                )
+                for row in range(min_row, max_row + 1):
+                    for col in range(min_col, max_col + 1):
+                        cell_id = openpyxl.utils.get_column_letter(col) + str(row)
+                        cells.append(f"{sheet_name}!{cell_id}")
+        except (AttributeError, TypeError, ValueError):
+            named_ranges[name] = {"status": "unsupported"}
+            continue
+        if len(cells) == 1:
+            named_ranges[name] = {"status": "single", "location": cells[0]}
+        elif len(cells) > 1:
+            named_ranges[name] = {
+                "status": "ambiguous",
+                "locations": sorted(set(cells)),
+            }
+        else:
+            named_ranges[name] = {"status": "unsupported"}
+
+    named_ranges_json = json.dumps(named_ranges, sort_keys=True)
+
     for sheet_name in sheet_names:
         ws_f = wb_formulas[sheet_name]
         ws_v = wb_values[sheet_name]
@@ -268,8 +297,22 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
                         "formula": formula_str,
                         "norm_formula": norm_formula,
                         "val_str": val_str,
+                        "named_ranges": named_ranges_json,
                     }
                 )
+
+    if not rows:
+        rows.append(
+            {
+                "sheet_name": "",
+                "cell_id": "",
+                "is_formula": False,
+                "formula": "",
+                "norm_formula": "",
+                "val_str": "",
+                "named_ranges": named_ranges_json,
+            }
+        )
 
     wb_formulas.close()
     wb_values.close()
@@ -282,6 +325,7 @@ def extract_xlsx_to_parquet(xlsx_path: Path, parquet_out: Path) -> dict:
             ("formula", pa.string()),
             ("norm_formula", pa.string()),
             ("val_str", pa.string()),
+            ("named_ranges", pa.string()),
         ]
     )
     table = pa.Table.from_pylist(rows, schema=schema)
