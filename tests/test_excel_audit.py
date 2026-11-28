@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import openpyxl
+from openpyxl.workbook.defined_name import DefinedName
 from typer.testing import CliRunner
 
 from attestory.cli import app
@@ -220,6 +221,93 @@ def test_modern_excel_calculation_errors_are_detected(tmp_path: Path):
     report_html = (tmp_path / receipt["path"]).read_text(encoding="utf-8")
     assert "#SPILL!" in report_html
     assert "#CALC!" in report_html
+
+
+def _build_named_workbook(
+    path: Path,
+    *,
+    metric_row: int,
+    metric_name: str = "MetricTotal",
+    named_range: str | None = None,
+):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    sheet["A1"] = "Header"
+    sheet[f"B{metric_row - 1}"] = 250
+    sheet[f"B{metric_row}"] = f"=SUM(B{metric_row - 1}:B{metric_row - 1})"
+    workbook.defined_names.add(
+        DefinedName(metric_name, attr_text=named_range or f"'Revenue'!$B${metric_row}")
+    )
+    if named_range is None:
+        workbook.defined_names.add(
+            DefinedName(
+                "MetricValue",
+                attr_text=f"'Revenue'!$B${metric_row - 1}",
+            )
+        )
+    workbook.save(path)
+
+
+def test_named_range_moves_with_row_insertion(tmp_path: Path):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Revenue.xlsx"
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "must_be_formula:\n"
+        "  - MetricTotal\n"
+        "assertions:\n"
+        "  - location: MetricValue\n"
+        "    equals: 250\n",
+        encoding="utf-8",
+    )
+
+    _build_named_workbook(workbook, metric_row=4)
+    first = commit_file(tmp_path, workbook)
+
+    _build_named_workbook(workbook, metric_row=5)
+    second = commit_file(tmp_path, workbook)
+
+    assert first["record"]["rule_violations"] == []
+    assert second["record"]["rule_violations"] == []
+    assert not any(
+        finding["location"] == "MetricTotal" or finding["location"] == "MetricValue"
+        for finding in second["record"]["incomplete_findings"]
+    )
+
+
+def test_named_range_missing_ambiguous_and_coordinate_rules(tmp_path: Path):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Revenue.xlsx"
+    _build_named_workbook(
+        workbook,
+        metric_row=4,
+        metric_name="AmbiguousMetric",
+        named_range="'Revenue'!$B$3:$B$4",
+    )
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "must_be_formula:\n"
+        "  - MissingMetric\n"
+        "  - AmbiguousMetric\n"
+        "  - Revenue!B4\n"
+        "assertions:\n"
+        "  - location: MissingMetric\n"
+        "    equals: 250\n",
+        encoding="utf-8",
+    )
+
+    result = commit_file(tmp_path, workbook)
+
+    incomplete = result["record"]["incomplete_findings"]
+    reasons = {finding["location"]: finding["reason"] for finding in incomplete}
+    assert "MissingMetric" in reasons
+    assert "was not found" in reasons["MissingMetric"]
+    assert "AmbiguousMetric" in reasons
+    assert "ambiguous" in reasons["AmbiguousMetric"]
+    assert not any(
+        finding["rule"] == "must_be_formula"
+        and finding["location"] == "Revenue!B4"
+        for finding in result["record"]["rule_violations"]
+    )
 
 
 def test_uncached_formula_cannot_pass_numeric_assertion(tmp_path: Path):

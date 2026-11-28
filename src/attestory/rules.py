@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import duckdb
@@ -48,6 +49,55 @@ def _numeric_cell(snapshot: Path, location: str) -> tuple[bool, float | None]:
         return exists, None
 
 
+def _resolve_excel_location(snapshot: Path, location: str) -> tuple[str | None, str | None]:
+    """Resolve a coordinate or a snapshot-specific named range to one cell."""
+    if "!" in location:
+        return location, None
+
+    con = duckdb.connect(":memory:")
+    try:
+        columns = {
+            row[0]
+            for row in con.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [snapshot.as_posix()],
+            ).fetchall()
+        }
+        if "named_ranges" not in columns:
+            return None, (
+                f"Named range {location!r} is unavailable in this legacy snapshot."
+            )
+        row = con.execute(
+            "SELECT named_ranges FROM read_parquet(?) LIMIT 1",
+            [snapshot.as_posix()],
+        ).fetchone()
+    finally:
+        con.close()
+
+    if row is None or not row[0]:
+        return None, f"Named range {location!r} was not found in the workbook."
+    try:
+        metadata = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return None, f"Named range {location!r} metadata is unsupported."
+
+    resolved = metadata.get(location)
+    if resolved is None:
+        return None, f"Named range {location!r} was not found in the workbook."
+    status = resolved.get("status")
+    if status == "single":
+        target = resolved.get("location")
+        if isinstance(target, str) and "!" in target:
+            return target, None
+        return None, f"Named range {location!r} did not resolve to a valid cell."
+    if status == "ambiguous":
+        return None, (
+            f"Named range {location!r} is ambiguous "
+            f"(resolves to {len(resolved.get('locations', []))} cells)."
+        )
+    return None, f"Named range {location!r} is unsupported; use a single-cell range."
+
+
 def _pptx_metric(snapshot: Path, check: dict) -> tuple[bool, float | None]:
     clauses = ["slide_num = ?"]
     params: list[object] = [int(check["slide_num"])]
@@ -87,7 +137,11 @@ def _snapshot_metric(
         location = selector.get("location") or check.get("location")
         if not location:
             raise ValueError(f"Cross-file metric for {filename} requires a location.")
-        return _numeric_cell(snapshot, location)
+        resolved, resolution_error = _resolve_excel_location(snapshot, location)
+        if resolution_error:
+            raise ValueError(resolution_error)
+        assert resolved is not None
+        return _numeric_cell(snapshot, resolved)
     if extension == ".pptx":
         return _pptx_metric(snapshot, {**check, **selector})
     if extension == ".csv":
@@ -213,7 +267,16 @@ def evaluate_rules(
 
     if target_is_excel:
         for location in config.get("must_be_formula", []):
-            exists, value, is_formula = _cell_value(curr_pq, location)
+            resolved, resolution_error = _resolve_excel_location(curr_pq, location)
+            if resolution_error:
+                incomplete(
+                    "must_be_formula",
+                    location,
+                    resolution_error,
+                )
+                continue
+            assert resolved is not None
+            exists, value, is_formula = _cell_value(curr_pq, resolved)
             if not exists or not is_formula:
                 violations.append(
                     {
@@ -227,14 +290,23 @@ def evaluate_rules(
 
         for assertion in config.get("assertions", config.get("numeric_assertions", [])):
             location = assertion["location"]
-            exists, value = _numeric_cell(curr_pq, location)
+            resolved, resolution_error = _resolve_excel_location(curr_pq, location)
+            if resolution_error:
+                incomplete(
+                    "numeric_assertion",
+                    location,
+                    resolution_error,
+                )
+                continue
+            assert resolved is not None
+            exists, value = _numeric_cell(curr_pq, resolved)
             expected = {
                 key: assertion[key]
                 for key in ("min_value", "max_value", "equals")
                 if key in assertion
             }
             if exists and value is None:
-                _, raw_value, is_formula = _cell_value(curr_pq, location)
+                _, raw_value, is_formula = _cell_value(curr_pq, resolved)
                 if is_formula and raw_value == "":
                     incomplete(
                         "numeric_assertion",

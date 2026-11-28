@@ -188,6 +188,10 @@ receipt, commit history, and changelog.
 Excel formula cells without cached results are flagged in the commit output and
 HTML receipt; required numeric assertions that depend on those values are
 `INCOMPLETE` because their results cannot be verified.
+Excel rules may use a single-cell workbook or worksheet named range for
+`must_be_formula` and numeric assertions. Named ranges resolve against each
+captured workbook version. Missing, ambiguous, and unsupported ranges produce
+actionable `INCOMPLETE` findings; existing `Sheet!A1` coordinates remain supported.
 `attestory commit <file.xlsx> --recalculate` optionally recalculates the workbook
 with LibreOffice before snapshotting and evaluating assertions. LibreOffice must
 be installed, and recalculation updates the workbook file. When recalculation
