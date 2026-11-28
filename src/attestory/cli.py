@@ -23,6 +23,11 @@ from attestory.engine import (
     workspace_status,
 )
 from attestory.hooks import register_tool_use_hooks
+from attestory.signing import (
+    generate_signing_keypair,
+    load_public_key,
+    verify_audit,
+)
 
 app = typer.Typer(
     help="Attestory — Local version control & deterministic math auditing for analytics."
@@ -79,6 +84,73 @@ def init():
             title="Attestory",
         )
     )
+
+
+@app.command("keygen")
+def keygen():
+    """Generate or report the workspace Ed25519 signing keypair."""
+    private_path, public_path, key_id = generate_signing_keypair(
+        Path.cwd() / ATTESTORY_DIR
+    )
+    console.print(
+        f"[bold green]Signing key ready[/bold green]\n"
+        f"Key ID: [cyan]{key_id}[/cyan]\n"
+        f"Private: [cyan]{private_path}[/cyan]\n"
+        f"Public: [cyan]{public_path}[/cyan]"
+    )
+
+
+@app.command("verify-manifest")
+def verify_manifest(
+    manifest_file: Path = typer.Argument(
+        ..., exists=True, help="History JSON, audit record JSON, or signed manifest JSON."
+    ),
+    workbook: Path = typer.Argument(
+        ..., exists=True, help="Workbook whose hash is compared with the manifest."
+    ),
+    public_key: Path = typer.Option(
+        ..., "--public-key", "-k", exists=True, help="Trusted Ed25519 PEM public key."
+    ),
+    audit_id: str | None = typer.Option(
+        None, "--audit-id", help="Select an audit ID from a history JSON file."
+    ),
+    version: int | None = typer.Option(
+        None, "--version", "-v", help="Select a version from a history JSON file."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output strict machine-readable JSON."
+    ),
+):
+    """Offline verification of an audit signature, key, and workbook hash."""
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    record = payload
+    if isinstance(payload, dict) and "commits" in payload:
+        commits = payload["commits"]
+        if audit_id:
+            matches = [item for item in commits if item.get("audit_id") == audit_id]
+        elif version is not None:
+            matches = [item for item in commits if item.get("version") == version]
+        else:
+            matches = commits
+        if len(matches) != 1:
+            raise typer.BadParameter(
+                "History JSON requires exactly one selected audit via --audit-id or --version."
+            )
+        record = matches[0]
+
+    result = verify_audit(record, load_public_key(public_key), workbook)
+    if json_output:
+        print_machine_output(result)
+    else:
+        signature_status = "VALID" if result["signature_valid"] else "INVALID"
+        workbook_status = "MATCH" if result["workbook_match"] else "MISMATCH"
+        console.print(
+            f"Signature: {signature_status} ({result['key_status']})\n"
+            f"Workbook: {workbook_status}\n"
+            f"Recorded audit outcome: {result['audit_outcome'] or 'UNKNOWN'}"
+        )
+    if not result["signature_valid"] or result["workbook_match"] is not True:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -767,6 +839,21 @@ def generate_report(
             "outcome": latest.get("audit_status"),
             "findings": latest.get("findings", []),
         }
+    verification = {
+        "signature_valid": False,
+        "key_status": "unavailable",
+        "workbook_match": None,
+    }
+    public_key_path = root / ATTESTORY_DIR / "signing" / "public_key.pem"
+    if latest.get("signature") and public_key_path.is_file():
+        try:
+            verification = verify_audit(
+                latest,
+                load_public_key(public_key_path),
+                root / Path(key),
+            )
+        except (OSError, ValueError):
+            verification["key_status"] = "invalid"
     diff = (
         diff_file_snapshots(
             root / commits[latest_index - 1]["snapshot"],
@@ -942,7 +1029,10 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
 <span><strong>Engine version</strong> {escape(manifest.get("engine_version") or "unavailable (legacy history)")}</span>
 <span><strong>Evaluated ruleset digest</strong> {escape(manifest.get("evaluated_ruleset_digest") or "unavailable")}</span>
 <span><strong>Baseline SHA-256</strong> {escape(manifest.get("baseline_sha256") or "not available")}</span>
-<span><strong>Baseline snapshot digest</strong> {escape(manifest.get("baseline_snapshot_sha256") or "not available")}</span></div></header>
+<span><strong>Baseline snapshot digest</strong> {escape(manifest.get("baseline_snapshot_sha256") or "not available")}</span>
+<span><strong>Signature</strong> {"VALID" if verification["signature_valid"] else "INVALID"} ({escape(verification["key_status"])})</span>
+<span><strong>Workbook match</strong> {"MATCH" if verification["workbook_match"] is True else "MISMATCH" if verification["workbook_match"] is False else "NOT CHECKED"}</span>
+<span><strong>Recorded audit outcome</strong> {escape(status)}</span></div></header>
 <section class="cards"><div class="card"><span>Total Changes</span><strong>{total_changes}</strong></div>
 <div class="card"><span>Hardcode Overrides</span><strong>{hardcodes}</strong></div>
 <div class="card"><span>Formula Edits</span><strong>{formulas}</strong></div>
@@ -996,6 +1086,10 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
             "external_references": latest.get("stats", {}).get(
                 "external_references", 0
             ),
+            "signature_valid": verification["signature_valid"],
+            "signature_key_status": verification["key_status"],
+            "workbook_match": verification["workbook_match"],
+            "audit_outcome": status,
         },
     }
 

@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import shutil
@@ -8,12 +9,14 @@ from types import SimpleNamespace
 
 import openpyxl
 import yaml
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from openpyxl.workbook.defined_name import DefinedName
 from typer.testing import CliRunner
 
 from attestory.cli import app
 from attestory.engine import commit_file, init_workspace
 from attestory.parsers.excel import normalize_formula
+from attestory.signing import load_public_key, verify_audit
 
 runner = CliRunner()
 
@@ -529,6 +532,66 @@ def test_first_excel_capture_status_matches_cli_and_receipt(
     assert report_payload["status"] == commit_payload["status"]
     assert report_payload["incomplete_findings"] == commit_payload["incomplete_findings"]
     assert "INCOMPLETE" in html and "No prior snapshot exists" in html
+
+
+def test_signed_manifest_verifier_separates_signature_workbook_and_outcome(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Signed.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["B4"] = 250
+    wb.save(workbook)
+
+    committed = commit_file(tmp_path, workbook)
+    record = committed["record"]
+    public_key_path = tmp_path / ".attestory" / "signing" / "public_key.pem"
+    public_key = load_public_key(public_key_path)
+    valid = verify_audit(record, public_key, workbook)
+    assert valid["signature_valid"] is True
+    assert valid["key_status"] == "trusted"
+    assert valid["workbook_match"] is True
+    assert valid["audit_outcome"] == record["audit_status"]
+
+    cli_valid = runner.invoke(
+        app,
+        [
+            "verify-manifest",
+            str(tmp_path / ".attestory" / "history.json"),
+            str(workbook),
+            "--public-key",
+            str(public_key_path),
+            "--version",
+            "1",
+            "--json",
+        ],
+    )
+    assert cli_valid.exit_code == 0, cli_valid.stdout
+
+    unknown_private = Ed25519PrivateKey.generate()
+    unknown_public = unknown_private.public_key()
+    unknown = verify_audit(record, unknown_public, workbook)
+    assert unknown["signature_valid"] is False
+    assert unknown["key_status"] == "unknown"
+
+    modified_manifest = copy.deepcopy(record)
+    modified_manifest["audit_manifest"]["candidate_sha256"] = "0" * 64
+    modified_result = verify_audit(modified_manifest, public_key, workbook)
+    assert modified_result["signature_valid"] is False
+    assert modified_result["key_status"] == "invalid"
+
+    modified_signature = copy.deepcopy(record)
+    modified_signature["signature"]["value"] = "!"
+    signature_result = verify_audit(modified_signature, public_key, workbook)
+    assert signature_result["signature_valid"] is False
+
+    with workbook.open("ab") as file:
+        file.write(b"\n")
+    workbook_result = verify_audit(record, public_key, workbook)
+    assert workbook_result["signature_valid"] is True
+    assert workbook_result["workbook_match"] is False
+    assert workbook_result["audit_outcome"] == record["audit_status"]
 
 
 def test_historical_receipt_is_immutable_across_workbook_and_rule_changes(
