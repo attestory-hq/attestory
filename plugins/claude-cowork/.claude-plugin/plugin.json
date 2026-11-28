@@ -1,0 +1,11 @@
+{
+  "name": "attestory-cowork",
+  "displayName": "Attestory for Cowork",
+  "version": "0.1.0",
+  "description": "Make an auditable working copy of an Excel workbook, review Cowork's saved edits, and return a local audit receipt.",
+  "author": {
+    "name": "Attestory",
+    "url": "https://github.com/attestory-hq/attestory"
+  },
+  "license": "Apache-2.0"
+}
