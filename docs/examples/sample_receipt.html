@@ -1,28 +1,45 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Attestory Receipt — actuals.csv v1</title>
+<title>Attestory Receipt — Q4_Forecast.xlsx v2</title>
 <style>
 :root{color-scheme:light dark;--bg:#f4f6fa;--card:#fff;--ink:#172033;--muted:#667085;--line:#dce2eb;--accent:#2563eb;}
 @media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--ink:#f3f4f6;--muted:#aab4c4;--line:#374151;--accent:#60a5fa;}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
 main{max-width:1100px;margin:40px auto;padding:0 24px}header,.card,.diff{background:var(--card);border:1px solid var(--line);border-radius:14px}
-header{padding:26px;margin-bottom:18px}h1{margin:0 0 8px;font-size:25px}p,.muted{color:var(--muted)}.badge{display:inline-block;padding:6px 12px;border-radius:20px;font-weight:750;background:#067647;color:white}
+header{padding:26px;margin-bottom:18px}h1{margin:0 0 8px;font-size:25px}p,.muted{color:var(--muted)}.badge{display:inline-block;padding:6px 12px;border-radius:20px;font-weight:750;background:#b42318;color:white}
 .meta{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:18px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}
 .card{padding:18px}.card span{display:block;color:var(--muted);font-size:13px}.card strong{font-size:26px}
 .diff{overflow:hidden}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:12px 14px;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
-th{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)}tbody tr:nth-child(even){background:color-mix(in srgb,var(--accent) 4%,var(--card))}.change-hardcode td:last-child{color:#b42318;font-weight:700}.change-formula td:last-child{color:#b54708;font-weight:700}.change-value td:last-child,.change-chart td:last-child{color:#067647;font-weight:700}.change-text td:last-child,.change-table td:last-child{color:var(--accent);font-weight:700}.empty{text-align:center;color:var(--muted);padding:30px}.violations{color:#b42318}
+th{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)}tbody tr:nth-child(even){background:color-mix(in srgb,var(--accent) 4%,var(--card))}.change-hardcode td:last-child,.change-deletion td:last-child{color:#b42318;font-weight:700}.change-formula td:last-child{color:#b54708;font-weight:700}.change-value td:last-child,.change-chart td:last-child{color:#067647;font-weight:700}.change-text td:last-child,.change-table td:last-child{color:var(--accent);font-weight:700}.empty{text-align:center;color:var(--muted);padding:30px}.violations{color:#b42318}
 @media print{:root{color-scheme:light}body{background:white}main{margin:0 auto}}
 </style></head><body><main>
-<header><span class="badge">VERIFIED</span><h1>Attestory Receipt</h1><div>actuals.csv · Version 1</div>
-<div class="meta"><span><strong>SHA-256</strong> eb968853ecd7ffca1866949589219d69e709902e6f59aa9341eb8819ad5daa53</span>
-<span><strong>Timestamp</strong> 2026-11-27T20:20:03.958754+00:00</span>
-<span><strong>Commit note</strong> Approved sample actuals</span></div></header>
-<section class="cards"><div class="card"><span>Total Changes</span><strong>0</strong></div>
-<div class="card"><span>Hardcode Overrides</span><strong>0</strong></div>
+<header><span class="badge">FAIL</span><h1>Attestory Receipt</h1><div>Q4_Forecast.xlsx · Version 2</div>
+<div class="meta"><span><strong>SHA-256</strong> a80f270c161e5d9389c3c104ed2767fd6aef00151f93c1b4127ae3956cf12ec8</span>
+<span><strong>Timestamp</strong> 2026-11-28T13:31:07.622152+00:00</span>
+<span><strong>Commit note</strong> Simulated AI hardcode edit</span>
+<span><strong>Audit ID</strong> aud_45adfac7294b42e39687cb01f0271a8a</span>
+<span><strong>Manifest schema</strong> 1</span>
+<span><strong>Engine version</strong> 0.3.2</span>
+<span><strong>Evaluated ruleset digest</strong> 946535aa957b14708e8665b7409ca1690cde68d524c2827810ef8a196acfc909</span>
+<span><strong>Baseline SHA-256</strong> 40946c26dd6c061e0aa786accbb1e0f742c3f0cbaaaeb2ee78914a6729f1737e</span>
+<span><strong>Baseline snapshot digest</strong> 40521b5a2de38e267e8b9aeacb8f1112dc78c3594b3b0fa23f3d4338ffce0e48</span>
+<span><strong>Signature</strong> VALID (trusted)</span>
+<span><strong>Workbook match</strong> MATCH</span>
+<span><strong>Recorded audit outcome</strong> FAIL</span></div></header>
+<section class="cards"><div class="card"><span>Total Changes</span><strong>1</strong></div>
+<div class="card"><span>Hardcode Overrides</span><strong>1</strong></div>
 <div class="card"><span>Formula Edits</span><strong>0</strong></div>
-<div class="card"><span>Rule Violations</span><strong>0</strong></div>
+<div class="card"><span>Formulas Cleared</span><strong>0</strong></div>
+<div class="card"><span>Formula Cells Removed</span><strong>0</strong></div>
+<div class="card"><span>Formula Errors</span><strong>0</strong></div>
+<div class="card"><span>Rule Violations</span><strong>2</strong></div>
+<div class="card"><span>Formula Cache Warnings</span><strong>0</strong></div>
 <div class="card"><span>External References</span><strong>0</strong></div></section>
+<section class='card violations'><strong>Rule violations</strong><ul><li><strong>must_be_formula</strong> — Revenue!B4: Revenue!B4 must remain a formula.</li><li><strong>cross_file_check</strong> — Board_Deck.pptx / Q4_Forecast.xlsx: Slide 2 ARR must match the forecast total.</li></ul></section>
+
+<section class='card'><strong>Required check execution</strong><ul><li><strong>must_be_formula</strong> — failed at Revenue!B4: Required formula check failed.</li><li><strong>cross_file_check</strong> — failed at Board_Deck.pptx / Q4_Forecast.xlsx: Required cross-file check failed.</li></ul></section>
+
 
 <section class="diff"><table><thead><tr><th>Element</th><th>Previous</th><th>Current</th><th>Numeric delta</th><th>Change type</th></tr></thead>
-<tbody><tr><td colspan="5" class="empty">No changes in this snapshot.</td></tr></tbody></table></section>
+<tbody><tr class="change-hardcode"><td>Revenue!B4</td><td>=SUM(B2:B3)</td><td>412000</td><td></td><td>Hardcode override</td></tr></tbody></table></section>
 </main></body></html>

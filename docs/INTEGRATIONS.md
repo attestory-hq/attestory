@@ -13,6 +13,23 @@ print(result.to_dict())
 `verify()` creates a snapshot and returns `PASS`, `FAIL`, or `INCOMPLETE`
 alongside formula changes, formula errors, rule violations, and summary fields.
 
+## Local storage
+
+Attestory keeps audit data in the `.attestory/` directory beside the
+workbook. It contains:
+
+- `snapshots/` — versioned, content-addressed Parquet snapshots.
+- `history.json` and `changelog.md` — recorded audit manifests and a readable
+  change history.
+- `rules.yaml` — workspace checks and business rules.
+- `reports/` — standalone HTML audit receipts.
+- `signing/` — the workspace Ed25519 signing keys. Protect the private key
+  when backing up or sharing audit data.
+
+Keep `.attestory/` with the workbook when you need its baseline and audit
+history; a workbook copied without its snapshots cannot be compared to that
+baseline.
+
 ## Claude hooks
 
 Install the Claude Cowork or Claude Code skill:

@@ -185,11 +185,19 @@ def test_demo_creates_warning_violation_and_receipt(tmp_path: Path):
     result = runner.invoke(app, ["demo", "--dir", str(demo_dir)])
     assert result.exit_code == 0, result.stdout
     assert "HARDCODE OVERRIDE" in result.stdout
+    assert "Revenue!B4: =SUM(B2:B3) -> 412000" in result.stdout
+    assert "Expected audit result: FAIL" in result.stdout
     assert "RULE VIOLATION" in result.stdout
     assert (demo_dir / ".attestory" / "rules.yaml").is_file()
-    assert (
+    receipt_path = (
         demo_dir / ".attestory" / "reports" / "Q4_Forecast_v2_receipt.html"
-    ).is_file()
+    )
+    assert receipt_path.is_file()
+    receipt = receipt_path.read_text(encoding="utf-8")
+    assert "FAIL" in receipt
+    assert "<td>Revenue!B4</td><td>=SUM(B2:B3)</td><td>412000</td>" in receipt
+    assert "must_be_formula" in receipt
+    assert "Required formula check failed." in receipt
     changelog = (demo_dir / ".attestory" / "changelog.md").read_text(encoding="utf-8")
     assert "HARDCODE OVERRIDE" in changelog
     assert "RULE VIOLATION" in changelog
