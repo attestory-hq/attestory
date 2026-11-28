@@ -1,14 +1,22 @@
 import csv
 import json
+import time
 from pathlib import Path
+from zipfile import BadZipFile
 
 import openpyxl
 import yaml
 from typer.testing import CliRunner
+from watchdog.events import FileMovedEvent
 
+import attestory.watcher as watcher_module
 from attestory.cli import app
 from attestory.engine import commit_file, init_workspace, workspace_status
-from attestory.watcher import is_ignored_path, snapshot_if_changed
+from attestory.watcher import (
+    SnapshotEventHandler,
+    is_ignored_path,
+    snapshot_if_changed,
+)
 
 runner = CliRunner()
 
@@ -67,6 +75,97 @@ def test_watcher_ignores_noise_and_deduplicates_content(tmp_path: Path):
     second = snapshot_if_changed(tmp_path, source)
     assert second is not None
     assert second["record"]["version"] == 2
+
+
+def test_watcher_retries_transient_read_then_snapshots_once(tmp_path: Path, monkeypatch):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Q4_Forecast.xlsx"
+    _write_workbook(workbook)
+    attempts = 0
+
+    def transient_commit(root, path, message):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BadZipFile("workbook is still being saved")
+        return {"record": {"file": "Q4_Forecast.xlsx", "version": attempts}}
+
+    monkeypatch.setattr(watcher_module, "commit_file", transient_commit)
+    monkeypatch.setattr(watcher_module.time, "sleep", lambda _delay: None)
+
+    result = snapshot_if_changed(
+        tmp_path,
+        workbook,
+        retry_attempts=3,
+        retry_delay=0.01,
+    )
+
+    assert result["record"]["version"] == 2
+    assert attempts == 2
+
+
+def test_watcher_move_destinations_schedule_one_snapshot(tmp_path: Path, monkeypatch):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Q4_Forecast.xlsx"
+    replacement = tmp_path / "Q4_Forecast.tmp"
+    _write_workbook(replacement, 300)
+    replacement.rename(workbook)
+    scheduled_paths = []
+
+    def fake_snapshot(root, path, retry_attempts, retry_delay):
+        scheduled_paths.append(path)
+        return {"record": {"file": "Q4_Forecast.xlsx", "version": 1}}
+
+    monkeypatch.setattr(watcher_module, "snapshot_if_changed", fake_snapshot)
+    commits = []
+    handler = SnapshotEventHandler(
+        tmp_path,
+        debounce=0.01,
+        on_commit=lambda result: commits.append(result),
+    )
+
+    handler.on_moved(FileMovedEvent(str(tmp_path / "Q4.tmp"), str(workbook)))
+
+    deadline = time.monotonic() + 1
+    while not scheduled_paths and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    handler.stop()
+    assert scheduled_paths == [workbook.resolve()]
+    assert len(commits) == 1
+
+
+def test_watcher_exhausted_retries_preserve_history(tmp_path: Path, monkeypatch):
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Q4_Forecast.xlsx"
+    _write_workbook(workbook)
+    baseline = commit_file(tmp_path, workbook)
+    history_path = tmp_path / ".attestory" / "history.json"
+    before = history_path.read_bytes()
+
+    _write_workbook(workbook, amount=300)
+
+    def locked_commit(root, path, message):
+        raise PermissionError("workbook is locked")
+
+    monkeypatch.setattr(watcher_module, "commit_file", locked_commit)
+    monkeypatch.setattr(watcher_module.time, "sleep", lambda _delay: None)
+
+    try:
+        snapshot_if_changed(
+            tmp_path,
+            workbook,
+            retry_attempts=3,
+            retry_delay=0.01,
+        )
+    except PermissionError as error:
+        assert str(error) == "workbook is locked"
+    else:
+        raise AssertionError("Expected exhausted retries to raise")
+
+    assert history_path.read_bytes() == before
+    assert len(json.loads(before)["commits"]) == 1
+    assert json.loads(before)["commits"][0]["sha256"] == baseline["record"]["sha256"]
 
 
 def test_nested_files_with_same_name_have_independent_history(tmp_path: Path):

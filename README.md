@@ -90,6 +90,12 @@ attestory watch
 Use `attestory watch --recursive` to include subdirectories, or tune its save
 debounce with `attestory watch --debounce 1.0`.
 
+The watcher follows replacement-by-rename saves to supported destination files
+and retries transient read failures with bounded backoff. Exhausted retries
+leave the existing verified history unchanged and report the read failure.
+OneDrive and SharePoint synchronization behavior should be validated separately
+for each deployment.
+
 Tracked artifacts are identified by their normalized workspace-relative paths,
 including extensions, so files such as `Finance/Forecast.xlsx`,
 `Sales/Forecast.xlsx`, and `Forecast.csv` have independent histories and
