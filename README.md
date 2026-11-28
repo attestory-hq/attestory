@@ -1,3 +1,5 @@
+![Attestory banner with a tilted red-orange spreadsheet cell on a citron background](docs/assets/attestory-banner.jpg)
+
 # Attestory
 
 [![CI](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml/badge.svg)](https://github.com/attestory-hq/attestory/actions/workflows/ci.yml)
@@ -5,28 +7,29 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
-**Audit AI-edited Excel workbooks before the numbers ship.**
+**Catch broken Excel formulas after an AI edit.** A forecast can still show
+$412,000 after its revenue formula has been replaced with a typed number.
+Attestory compares the workbook with its baseline and shows the changed cell
+in a local audit receipt.
 
-Attestory is a local-first Excel audit tool that catches silent formula
-regressions, formula deletions, calculation errors, and rule violations. It
-stores content-addressed snapshots beside the workbook and produces a signed,
-self-contained receipt.
+> **FAIL — `Revenue!B4`**
+>
+> `=SUM(B2:B3)` was replaced with hardcoded `412000`; the required formula
+> check failed.
 
-```text
-Baseline:   Revenue!B4 = =SUM(B2:B3)
-Candidate:  Revenue!B4 = 412000
-Result:     FAIL — formula was replaced by a hardcoded value
-```
+[View a sample receipt](docs/examples/sample_receipt.md) ·
+[Try the Excel audit](#try-the-excel-audit)
 
-Everything runs locally. `.attestory/` contains verified Parquet snapshots,
-history, rules, signing keys, and HTML receipts; submitted workbooks are never
-uploaded or modified by an audit.
+Everything runs locally. Attestory catches formula regressions, formula
+deletions, calculation errors, and rule violations. It stores content-addressed
+snapshots beside the workbook and produces a signed, self-contained receipt.
+Submitted workbooks are never uploaded or modified by an audit.
 
 ## Outcomes
 
 | Outcome | Meaning |
 |---|---|
-| **PASS** | The baseline exists and every required check completed successfully. |
+| **PASS** | An existing baseline was checked; every required check completed and passed. |
 | **FAIL** | A required formula, numeric, cross-file, or cell check failed. |
 | **INCOMPLETE** | Required evidence was unavailable, such as a missing baseline, formula cache, or external input. |
 
@@ -34,11 +37,26 @@ A formula cache can be unavailable when openpyxl or LibreOffice has not supplied
 a calculated value. Use `attestory commit <file.xlsx> --recalculate` when
 LibreOffice is installed. Required incomplete checks block PASS.
 
-## Five-minute Excel quickstart
+## Try the Excel audit
 
-Install from PyPI, or run this clean-checkout development setup:
+Python 3.11 or newer:
 
-```bash
+```sh
+python -m pip install attestory
+attestory demo --dir ./attestory-demo
+```
+
+The demo creates a baseline, replaces the `Revenue!B4` formula with the value
+`412000`, and runs the audit. **FAIL is the expected result**: the required
+formula was replaced even though the displayed total stays the same. Open
+`attestory-demo/.attestory/reports/Q4_Forecast_v2_receipt.html` to inspect the
+receipt.
+
+## Manual Excel walkthrough for contributors
+
+Install the checkout in editable mode, then create a workspace:
+
+```sh
 python -m pip install -e .
 mkdir attestory-excel-demo
 cd attestory-excel-demo
@@ -46,7 +64,7 @@ cd attestory-excel-demo
 
 Generate a workbook with an approved formula:
 
-```bash
+```sh
 python - <<'PY'
 import openpyxl
 
@@ -62,14 +80,14 @@ PY
 
 Capture the baseline:
 
-```bash
+```sh
 attestory commit Q4_Forecast.xlsx -m "Approved formula baseline"
 ```
 
 Replace the formula with a hardcoded number to simulate an AI or spreadsheet
 edit:
 
-```bash
+```sh
 python - <<'PY'
 import openpyxl
 
@@ -82,17 +100,15 @@ PY
 
 Run the audit and inspect the result:
 
-```bash
+```sh
 attestory commit Q4_Forecast.xlsx -m "Edited forecast"
 attestory diff Q4_Forecast.xlsx
 attestory report Q4_Forecast.xlsx
 ```
 
-The first command creates the baseline snapshot. The edited workbook should
-produce `FAIL` and identify `Revenue!B4` as a formula-to-hardcode override.
-Open `.attestory/reports/Q4_Forecast_v2_receipt.html` in a browser. The baseline
-is normally `INCOMPLETE` until a formula cache or a prior baseline comparison is
-available.
+The second commit should produce `FAIL` and identify `Revenue!B4` as a
+formula-to-hardcode override. The initial baseline can be `INCOMPLETE` when
+formula values or other required evidence are unavailable.
 
 ## Workflow
 
@@ -108,14 +124,6 @@ flowchart LR
     G --> H
 ```
 
-<div align="center">
-
-[![Attestory HTML audit receipt: PASS, FAIL, and INCOMPLETE findings are shown with workbook and audit metadata](docs/images/html-report.png)](docs/examples/sample_receipt.html)
-
-<sub><a href="docs/examples/sample_receipt.html">Open the sample HTML receipt</a></sub>
-
-</div>
-
 ## Supported Excel checks
 
 - Formula edits and formula-to-hardcode overrides
@@ -125,8 +133,6 @@ flowchart LR
 - Numeric assertions and single-cell named ranges
 - Snapshot diffs, row/cell changes, and external-reference review
 - Versioned, signed manifests and offline verification
-
-![Terminal view of an Attestory receipt](docs/images/terminal-receipt.png)
 
 For coverage boundaries and rule semantics, see
 [Excel verification coverage](docs/EXCEL_AUDIT.md).
@@ -145,7 +151,9 @@ For coverage boundaries and rule semantics, see
 ## Learn more
 
 - [Excel verification coverage](docs/EXCEL_AUDIT.md)
-- [Python API, hooks, server, and integration configuration](docs/INTEGRATIONS.md)
+- [Local storage details](docs/INTEGRATIONS.md#local-storage)
+- [Python API, hooks, server, and integrations](docs/INTEGRATIONS.md)
+- [Rule configuration](docs/INTEGRATIONS.md#rules)
 - [Rules example](examples/rules.yaml)
 - [Labeled regression corpus](tests/fixtures/excel_verification/cases.yaml)
 - [Contributing](CONTRIBUTING.md)

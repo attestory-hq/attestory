@@ -945,7 +945,11 @@ def generate_report(
                 rows.append(
                     (
                         change["location"],
-                        change.get("old_val", change.get("old_formula", "")),
+                        (
+                            change.get("old_formula", "")
+                            if category == "Hardcode override"
+                            else change.get("old_val", change.get("old_formula", ""))
+                        ),
                         change.get(
                             "new_val",
                             "blank"
@@ -1356,11 +1360,21 @@ def demo(
         sheet["A3"] = "Mid-Market"
         sheet["B3"] = 162000
         sheet["A4"] = "Total"
-        sheet["B4"] = 428000 if hardcoded else "=SUM(B2:B3)"
+        sheet["B4"] = 412000 if hardcoded else "=SUM(B2:B3)"
         workbook.save(workbook_path)
 
     save_workbook(hardcoded=False)
     commit_file(target, workbook_path, "Clean formula baseline")
+    presentation = Presentation()
+    presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1))
+    shape.name = "ARR"
+    shape.text_frame.text = "ARR $428,000"
+    deck_path = target / "Board_Deck.pptx"
+    presentation.save(deck_path)
+    commit_file(target, deck_path, "Board deck ARR figure")
+
     save_workbook(hardcoded=True)
     workbook_result = commit_file(target, workbook_path, "Simulated AI hardcode edit")
     overrides = workbook_result["diff"]["hardcode_overrides"]
@@ -1370,17 +1384,7 @@ def demo(
             f"{override['location']}: {override['old_formula']} -> "
             f"{override['new_hardcoded_val']}"
         )
-
-    presentation = Presentation()
-    presentation.slides.add_slide(presentation.slide_layouts[6])
-    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-    shape = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1))
-    shape.name = "ARR"
-    shape.text_frame.text = "ARR $412,000"
-    deck_path = target / "Board_Deck.pptx"
-    presentation.save(deck_path)
-    deck_result = commit_file(target, deck_path, "Board deck ARR figure")
-    for violation in deck_result["record"]["rule_violations"]:
+    for violation in workbook_result["record"]["rule_violations"]:
         console.print(
             f"[bold red]RULE VIOLATION[/bold red] "
             f"{violation['description']}: expected {violation['expected']}, "
@@ -1391,6 +1395,8 @@ def demo(
     console.print(
         Panel.fit(
             f"[bold green]Demo workspace ready[/bold green] at [cyan]{target}[/cyan]\n"
+            "Expected audit result: FAIL — the demo intentionally replaces the "
+            "required formula in Revenue!B4.\n"
             f"Inspect the receipt: [bold]{target / report_result['path']}[/bold]\n"
             f"Inspect the audit trail: [bold]{target / ATTESTORY_DIR / 'changelog.md'}[/bold]",
             title="Attestory Demo",
