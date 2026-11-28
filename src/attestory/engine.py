@@ -431,6 +431,7 @@ def _commit_file_locked(
     )
     rule_violations = rule_results["violations"]
     incomplete_findings = rule_results["incomplete_findings"]
+    required_checks = list(rule_results.get("check_statuses", []))
     if recalculation and recalculation["status"] == "failed":
         required_rules = {"must_be_formula", "numeric_assertion", "cross_file_check"}
         retained_violations = []
@@ -463,6 +464,13 @@ def _commit_file_locked(
                     ),
                 }
             )
+        required_checks.append({
+            "check": "recalculation",
+            "location": target_key,
+            "status": "skipped",
+            "required": True,
+            "reason": recalculation["error"],
+        })
     if extension == ".xlsx" and not file_commits:
         incomplete_findings.append(
             {
@@ -471,6 +479,13 @@ def _commit_file_locked(
                 "reason": "No prior snapshot exists for this workbook; comparative checks cannot run.",
             }
         )
+        required_checks.append({
+            "check": "baseline",
+            "location": target_key,
+            "status": "skipped",
+            "required": True,
+            "reason": "No prior snapshot exists for this workbook.",
+        })
     for warning in stats.get("formula_cache_warnings", []):
         if warning["warning"] == "uncached":
             incomplete_findings.append(
@@ -480,6 +495,26 @@ def _commit_file_locked(
                     "reason": "The formula has no cached result, so checks that depend on its value cannot run.",
                 }
             )
+            required_checks.append({
+                "check": "formula_cache",
+                "location": warning["location"],
+                "status": "skipped",
+                "required": True,
+                "reason": "Formula cache is unavailable.",
+            })
+    for external in stats.get("unresolved_external_references", []):
+        incomplete_findings.append({
+            "rule": "external_reference",
+            "location": external["location"],
+            "reason": external["reason"],
+        })
+        required_checks.append({
+            "check": "external_reference",
+            "location": external["location"],
+            "status": "unsupported",
+            "required": True,
+            "reason": external["reason"],
+        })
     failed_checks = bool(
         stats.get("errors")
         or rule_violations
@@ -572,6 +607,7 @@ def _commit_file_locked(
         "outcome": audit_status,
         "findings": findings,
         "recalculation": recalculation_record,
+        "required_checks": required_checks,
     }
     private_key, _ = ensure_signing_keypair(meta_dir)
     audit_signature = sign_manifest(
@@ -633,6 +669,7 @@ def _commit_file_locked(
         "findings": findings,
         "audit_manifest": audit_manifest,
         "signature": audit_signature,
+        "required_checks": required_checks,
         "diff_summary": {
             "total_changes": diff_report["total_changes"] if diff_report else 0,
             "hardcode_overrides": len(diff_report.get("hardcode_overrides", []))

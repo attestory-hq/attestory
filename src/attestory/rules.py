@@ -253,16 +253,26 @@ def evaluate_rules(
     """Evaluate configured formula, numeric, and cross-file assertions."""
     rules_path = root / ".attestory" / "rules.yaml"
     if not rules_path.exists():
-        return {"violations": [], "incomplete_findings": []}
+        return {"violations": [], "incomplete_findings": [], "check_statuses": []}
     config = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
     violations = []
     incomplete_findings = []
+    check_statuses = []
     target_is_excel = target_file.suffix.lower() == ".xlsx"
     target_key = artifact_key or target_file.relative_to(root).as_posix()
 
     def incomplete(rule: str, location: str, reason: str) -> None:
         incomplete_findings.append(
             {"rule": rule, "location": location, "reason": reason}
+        )
+        check_statuses.append(
+            {
+                "check": rule,
+                "location": location,
+                "status": "skipped",
+                "required": True,
+                "reason": reason,
+            }
         )
 
     if target_is_excel:
@@ -287,6 +297,21 @@ def evaluate_rules(
                         "description": f"{location} must remain a formula.",
                     }
                 )
+                check_statuses.append({
+                    "check": "must_be_formula",
+                    "location": location,
+                    "status": "failed",
+                    "required": True,
+                    "reason": "Required formula check failed.",
+                })
+            else:
+                check_statuses.append({
+                    "check": "must_be_formula",
+                    "location": location,
+                    "status": "executed",
+                    "required": True,
+                    "reason": "",
+                })
 
         for assertion in config.get("assertions", config.get("numeric_assertions", [])):
             location = assertion["location"]
@@ -331,6 +356,21 @@ def evaluate_rules(
                         "description": assertion.get("description", ""),
                     }
                 )
+                check_statuses.append({
+                    "check": "numeric_assertion",
+                    "location": location,
+                    "status": "failed",
+                    "required": True,
+                    "reason": "Required numeric assertion failed.",
+                })
+            else:
+                check_statuses.append({
+                    "check": "numeric_assertion",
+                    "location": location,
+                    "status": "executed",
+                    "required": True,
+                    "reason": "",
+                })
 
     for check in config.get("cross_file_checks", []):
         if not isinstance(check, dict):
@@ -485,4 +525,23 @@ def evaluate_rules(
                     "description": check.get("description", ""),
                 }
             )
-    return {"violations": violations, "incomplete_findings": incomplete_findings}
+            check_statuses.append({
+                "check": "cross_file_check",
+                "location": f"{file_specs[0][0]} / {file_specs[1][0]}",
+                "status": "failed",
+                "required": True,
+                "reason": "Required cross-file check failed.",
+            })
+        else:
+            check_statuses.append({
+                "check": "cross_file_check",
+                "location": f"{file_specs[0][0]} / {file_specs[1][0]}",
+                "status": "executed",
+                "required": True,
+                "reason": "",
+            })
+    return {
+        "violations": violations,
+        "incomplete_findings": incomplete_findings,
+        "check_statuses": check_statuses,
+    }
