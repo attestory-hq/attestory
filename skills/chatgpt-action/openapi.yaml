@@ -48,6 +48,89 @@ paths:
                     type: string
         "404":
           description: No initialized Attestory workspace
+  /v1/excel/edit-verify:
+    post:
+      operationId: editAndVerifyExcel
+      summary: Compare an original XLSX with its edited candidate
+      description: >
+        Prototype two-file handoff. Before calling, disclose that both XLSX
+        files will be sent to the configured Attestory backend, then obtain
+        explicit user consent. Only report PASS as verified. Always surface
+        cell_findings and incomplete_findings; INCOMPLETE is not a pass.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - original_file
+                - candidate_file
+                - confirm_backend_processing
+              properties:
+                original_file:
+                  type: string
+                  format: binary
+                  description: Original workbook supplied by the user.
+                candidate_file:
+                  type: string
+                  format: binary
+                  description: Exact edited candidate workbook to audit and return.
+                confirm_backend_processing:
+                  type: boolean
+                  description: >
+                    Set true only after the user has explicitly consented to
+                    sending both workbooks to this configured backend.
+      responses:
+        "200":
+          description: Audit outcome and short-lived exact-candidate/receipt links
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExcelEditVerification"
+        "400":
+          description: Missing consent or unsupported file extension
+        "413":
+          description: Either workbook exceeds the 25 MiB upload limit
+  /v1/excel/edit-verify/{audit_id}/candidate:
+    get:
+      operationId: downloadExcelCandidate
+      summary: Download the exact candidate bytes that were audited
+      parameters:
+        - in: path
+          name: audit_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Candidate XLSX; download link expires after 15 minutes
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Download link has expired
+  /v1/excel/edit-verify/{audit_id}/receipt:
+    get:
+      operationId: downloadExcelReceipt
+      summary: Download the HTML receipt for the edit-and-verify audit
+      parameters:
+        - in: path
+          name: audit_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: HTML receipt; download link expires after 15 minutes
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: Download link has expired
   /v1/commit:
     post:
       operationId: commitFile
@@ -158,6 +241,68 @@ paths:
           description: File has no committed snapshot
 components:
   schemas:
+    ExcelEditVerification:
+      type: object
+      required:
+        - audit_id
+        - filename
+        - status
+        - verified
+        - original_sha256
+        - candidate_sha256
+        - baseline_sha256
+        - findings
+        - cell_findings
+        - incomplete_findings
+        - required_checks
+        - candidate_download_url
+        - receipt_download_url
+        - downloads_expire_in_seconds
+      properties:
+        audit_id:
+          type: string
+        filename:
+          type: string
+        status:
+          type: string
+          enum: [PASS, FAIL, INCOMPLETE]
+        verified:
+          type: boolean
+          description: True only when the complete audit passed.
+        original_sha256:
+          type: [string, "null"]
+        candidate_sha256:
+          type: string
+        baseline_sha256:
+          type: [string, "null"]
+        findings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        cell_findings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        incomplete_findings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        required_checks:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        candidate_download_url:
+          type: string
+          format: uri
+        receipt_download_url:
+          type: string
+          format: uri
+        downloads_expire_in_seconds:
+          type: integer
     Receipt:
       type: object
       required:

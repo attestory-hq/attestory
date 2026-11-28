@@ -116,3 +116,6 @@ The bridge is scoped to the current workspace and listens only on the supplied
 host/port. Bind to localhost for local use; do not expose it directly to an
 untrusted network. The OpenAPI bridge specification is at
 [`skills/chatgpt-action/openapi.yaml`](../skills/chatgpt-action/openapi.yaml).
+The ChatGPT Action prototype and its two-file fallback, consent disclosure,
+and artifact-retention behavior are documented in
+[`CHATGPT_ACTION.md`](CHATGPT_ACTION.md).
