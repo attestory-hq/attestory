@@ -153,6 +153,7 @@ For coverage boundaries and rule semantics, see
 - [Excel verification coverage](docs/EXCEL_AUDIT.md)
 - [Local storage details](docs/INTEGRATIONS.md#local-storage)
 - [Python API, hooks, server, and integrations](docs/INTEGRATIONS.md)
+- [ChatGPT Excel edit-and-verify prototype](docs/CHATGPT_ACTION.md)
 - [Rule configuration](docs/INTEGRATIONS.md#rules)
 - [Rules example](examples/rules.yaml)
 - [Labeled regression corpus](tests/fixtures/excel_verification/cases.yaml)

@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import io
 from pathlib import Path
 
 import openpyxl
@@ -255,6 +257,81 @@ def test_fastapi_bridge_endpoints(tmp_path: Path):
         assert rejected.status_code == 400
     finally:
         outside.unlink(missing_ok=True)
+
+
+def test_chatgpt_excel_action_returns_exact_candidate_and_receipt(tmp_path: Path):
+    def workbook_bytes(total_formula: bool) -> bytes:
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Revenue"
+        sheet["B2"] = 250
+        sheet["B3"] = 162
+        sheet["B4"] = "=SUM(B2:B3)" if total_formula else 412
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        return buffer.getvalue()
+
+    original_bytes = workbook_bytes(total_formula=True)
+    candidate_bytes = workbook_bytes(total_formula=False)
+    client = TestClient(create_app(tmp_path))
+
+    response = client.post(
+        "/v1/excel/edit-verify",
+        files={
+            "original_file": ("original.xlsx", original_bytes),
+            "candidate_file": ("edited.xlsx", candidate_bytes),
+        },
+        data={"confirm_backend_processing": "true"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "FAIL"
+    assert result["verified"] is False
+    assert result["candidate_sha256"] == hashlib.sha256(candidate_bytes).hexdigest()
+    assert any(
+        finding["location"] == "Revenue!B4"
+        for finding in result["cell_findings"]
+    )
+
+    candidate_download = client.get(result["candidate_download_url"])
+    assert candidate_download.content == candidate_bytes
+    assert candidate_download.headers["x-attestory-sha256"] == result[
+        "candidate_sha256"
+    ]
+    receipt_download = client.get(result["receipt_download_url"])
+    assert receipt_download.status_code == 200
+    assert "FAIL" in receipt_download.text
+
+
+def test_chatgpt_excel_action_requires_processing_consent_and_reports_incomplete(
+    tmp_path: Path,
+):
+    client = TestClient(create_app(tmp_path))
+    files = {
+        "original_file": ("original.xlsx", b"original"),
+        "candidate_file": ("edited.xlsx", b"not-an-xlsx"),
+    }
+
+    rejected = client.post(
+        "/v1/excel/edit-verify",
+        files=files,
+        data={"confirm_backend_processing": "false"},
+    )
+    assert rejected.status_code == 400
+
+    incomplete = client.post(
+        "/v1/excel/edit-verify",
+        files=files,
+        data={"confirm_backend_processing": "true"},
+    )
+    assert incomplete.status_code == 200
+    result = incomplete.json()
+    assert result["status"] == "INCOMPLETE"
+    assert result["verified"] is False
+    assert result["incomplete_findings"]
+    receipt = client.get(result["receipt_download_url"])
+    assert "INCOMPLETE" in receipt.text
 
 
 @pytest.mark.parametrize("extension", [".html", ".csv"])
