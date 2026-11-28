@@ -49,10 +49,14 @@ def test_audit_result_json_has_stable_compact_diagnostic_schema(tmp_path: Path):
 
     assert set(payload) == {
         "passed",
+        "status",
         "hardcoded_regressions",
         "formula_errors",
         "rule_violations",
+        "incomplete_findings",
         "summary_stats",
     }
-    assert payload["passed"] is True
+    assert payload["passed"] is False
+    assert payload["status"] == "INCOMPLETE"
+    assert payload["incomplete_findings"]
     assert ": " not in encoded

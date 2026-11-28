@@ -169,10 +169,15 @@ def test_csv_parser_diff_and_cross_file_rule(tmp_path: Path):
     commit_file(tmp_path, source)
     good = commit_file(tmp_path, workbook)
     assert good["record"]["rule_violations"] == []
+    assert good["record"]["audit_status"] == "INCOMPLETE"
+
+    completed = commit_file(tmp_path, workbook)
+    assert completed["record"]["audit_status"] == "PASS"
 
     _write_workbook(workbook, 350)
     mismatch = commit_file(tmp_path, workbook)
     assert mismatch["record"]["rule_violations"][0]["rule"] == "cross_file_check"
+    assert mismatch["record"]["audit_status"] == "FAIL"
 
 
 def test_demo_creates_warning_violation_and_receipt(tmp_path: Path):
