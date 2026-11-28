@@ -47,13 +47,13 @@ attestory install-skill --target claude-code --hook
 uv tool install attestory
 # Or: pip install attestory
 
-# 1. Initialize .attestory/ in your working folder
-attestory init
-
-# 2. Audit and snapshot your workbook
+# Audit and snapshot a workbook (initializes .attestory/ automatically)
 attestory commit Q4_Forecast.xlsx -m "Initial baseline"
 
-# 3. After editing in Excel, Claude Cowork, or ChatGPT, commit again to catch silent regressions
+# For edit paths without a pre-edit hook, capture the existing workbook before editing
+attestory snapshot-before Q4_Forecast.xlsx
+
+# After editing in Excel, Claude Cowork, or ChatGPT, commit to catch silent regressions
 attestory commit Q4_Forecast.xlsx -m "Updated November actuals"
 
 # Optionally recalculate formulas with LibreOffice before auditing
@@ -115,13 +115,19 @@ Its `to_dict()` shape matches the compact
 JSON emitted by `attestory commit`, `diff`, `status`, and `report` with
 `--json`.
 
-For Claude Code, install the skill and opt into a project-level `PostToolUse`
-hook with `attestory install-skill --target claude-code --hook`. The hook
-audits `.xlsx`, `.pptx`, and `.csv` files after `Write`, `Edit`, or `MultiEdit`
-tools run. It is installed only in `.claude/settings.json`, preserves existing
-settings, and does not start a daemon. The `attestory` command must be
-available on Claude Code's `PATH`. Claude Cowork can use the installed skill;
-the project hook is specific to Claude Code.
+For Claude Code, install the skill and opt into project-level pre/post hooks
+with `attestory install-skill --target claude-code --hook`. `PreToolUse`
+captures an existing `.xlsx`, `.pptx`, or `.csv` before `Write`, `Edit`, or
+`MultiEdit`; `PostToolUse` audits the saved candidate. The pre-edit capture is
+idempotent when the file has not changed since its latest snapshot, and history
+records the SHA-256 hash for each baseline and candidate. New files cannot have
+a pre-edit baseline and Excel audits remain `INCOMPLETE` until a later
+comparison. Other edit paths should run `attestory snapshot-before <file>`
+before editing; a post-edit snapshot cannot substitute for the original.
+Hooks are installed only in `.claude/settings.json`, preserve existing settings,
+and do not start a daemon. The `attestory` command must be available on Claude
+Code's `PATH`. Claude Cowork can use the installed skill; the project hooks
+apply only to Claude Code's `Write`, `Edit`, and `MultiEdit` tools.
 
 ## Rules and cross-file checks
 

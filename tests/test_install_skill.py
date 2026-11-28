@@ -99,6 +99,13 @@ def test_install_skill_registers_post_tool_use_hook_idempotently(
     assert hooks[0]["hooks"][0]["command"] == "custom-audit"
     assert hooks[1]["matcher"] == "Write|Edit|MultiEdit"
     assert hooks[1]["hooks"][0]["command"] == "attestory hook-post-tool-use"
+    pre_hooks = settings["hooks"]["PreToolUse"]
+    assert pre_hooks == [
+        {
+            "matcher": "Write|Edit|MultiEdit",
+            "hooks": [{"type": "command", "command": "attestory hook-pre-tool-use"}],
+        }
+    ]
 
 
 def test_install_skill_rejects_hook_for_cowork_only(tmp_path: Path, monkeypatch):

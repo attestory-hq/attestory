@@ -1,3 +1,5 @@
+import hashlib
+import json
 import shutil
 import xml.etree.ElementTree as ET
 import zipfile
@@ -208,6 +210,144 @@ def test_first_excel_capture_status_matches_cli_and_receipt(
     assert report_payload["status"] == commit_payload["status"]
     assert report_payload["incomplete_findings"] == commit_payload["incomplete_findings"]
     assert "INCOMPLETE" in html and "No prior snapshot exists" in html
+
+
+def test_claude_hooks_capture_excel_before_first_and_repeated_edits(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["B2"] = 250000
+    wb.save(workbook)
+    original_hash = hashlib.sha256(workbook.read_bytes()).hexdigest()
+
+    def invoke_hook(command: str):
+        return runner.invoke(
+            app,
+            [command],
+            input=json.dumps(
+                {
+                    "cwd": str(tmp_path),
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(workbook)},
+                }
+            ),
+        )
+
+    before_first_edit = invoke_hook("hook-pre-tool-use")
+    assert before_first_edit.exit_code == 0, before_first_edit.output
+    initial_record = json.loads(
+        (tmp_path / ".attestory" / "history.json").read_text(encoding="utf-8")
+    )["commits"][0]
+    assert initial_record["sha256"] == original_hash
+
+    wb = openpyxl.load_workbook(workbook)
+    wb.active["B2"] = 260000
+    wb.save(workbook)
+    after_first_edit = invoke_hook("hook-post-tool-use")
+    assert after_first_edit.exit_code == 0, after_first_edit.output
+
+    before_repeated_edit = invoke_hook("hook-pre-tool-use")
+    assert before_repeated_edit.exit_code == 0, before_repeated_edit.output
+    history_path = tmp_path / ".attestory" / "history.json"
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert len(history["commits"]) == 2
+    assert json.loads(before_repeated_edit.stdout)["captured"] is False
+
+    wb = openpyxl.load_workbook(workbook)
+    wb.active["B3"] = 170000
+    wb.save(workbook)
+    after_repeated_edit = invoke_hook("hook-post-tool-use")
+    assert after_repeated_edit.exit_code == 0, after_repeated_edit.output
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert len(history["commits"]) == 3
+    assert history["commits"][1]["sha256"] != history["commits"][2]["sha256"]
+
+
+def test_pre_edit_hook_reports_capture_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["B2"] = 250000
+    wb.save(workbook)
+
+    def fail_capture(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr("attestory.cli.snapshot_before", fail_capture)
+
+    result = runner.invoke(
+        app,
+        ["hook-pre-tool-use"],
+        input=json.dumps(
+            {
+                "cwd": str(tmp_path),
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(workbook)},
+            }
+        ),
+    )
+
+    assert result.exit_code == 2
+    assert "Could not capture pre-edit baseline: disk unavailable" in result.output
+
+
+def test_new_excel_file_without_pre_edit_contents_remains_incomplete(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    workbook = tmp_path / "New.xlsx"
+    event = json.dumps(
+        {
+            "cwd": str(tmp_path),
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(workbook)},
+        }
+    )
+
+    before_write = runner.invoke(app, ["hook-pre-tool-use"], input=event)
+    assert before_write.exit_code == 0
+    assert json.loads(before_write.stdout)["status"] == "INCOMPLETE"
+    assert not (tmp_path / ".attestory").exists()
+
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = 1
+    wb.save(workbook)
+    after_write = runner.invoke(app, ["hook-post-tool-use"], input=event)
+
+    assert after_write.exit_code == 1
+    assert json.loads(after_write.stdout)["status"] == "INCOMPLETE"
+    history = json.loads(
+        (tmp_path / ".attestory" / "history.json").read_text(encoding="utf-8")
+    )
+    assert history["commits"][0]["incomplete_findings"][0]["rule"] == "missing_baseline"
+
+
+def test_explicit_baseline_supports_uncovered_excel_edit_paths(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["B2"] = 250000
+    wb.save(workbook)
+    baseline = runner.invoke(app, ["snapshot-before", "Model.xlsx"])
+    assert baseline.exit_code == 0, baseline.output
+    baseline_hash = hashlib.sha256(workbook.read_bytes()).hexdigest()
+
+    wb = openpyxl.load_workbook(workbook)
+    wb.active["B2"] = 275000
+    wb.save(workbook)
+    audit = runner.invoke(app, ["commit", "Model.xlsx", "--json"])
+    assert audit.exit_code == 0, audit.output
+
+    history = json.loads(
+        (tmp_path / ".attestory" / "history.json").read_text(encoding="utf-8")
+    )
+    assert len(history["commits"]) == 2
+    assert history["commits"][0]["sha256"] == baseline_hash
+    assert history["commits"][1]["diff_summary"]["total_changes"] > 0
 
 
 def test_unsupported_cross_file_check_is_incomplete(tmp_path: Path, monkeypatch):
