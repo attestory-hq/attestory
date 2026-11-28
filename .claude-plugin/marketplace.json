@@ -1,0 +1,16 @@
+{
+  "name": "attestory",
+  "owner": {
+    "name": "Attestory"
+  },
+  "metadata": {
+    "description": "Local workbook auditing for Claude Cowork"
+  },
+  "plugins": [
+    {
+      "name": "attestory-cowork",
+      "source": "./plugins/claude-cowork",
+      "description": "Audit Excel edits through a local, plugin-managed working copy."
+    }
+  ]
+}
