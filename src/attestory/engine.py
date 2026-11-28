@@ -376,6 +376,31 @@ def commit_file(
     return {"record": record, "diff": diff_report}
 
 
+def snapshot_before(root: Path, target_file: Path, message: str = "") -> dict:
+    """Capture a file before editing, avoiding duplicate snapshots of unchanged content."""
+    root = root.expanduser().resolve()
+    target_file = target_file.expanduser()
+    if not target_file.is_absolute():
+        target_file = root / target_file
+    target_file = target_file.resolve()
+    if not target_file.is_file():
+        raise FileNotFoundError(f"Baseline target does not exist: {target_file}")
+
+    target_key = artifact_key(root, target_file)
+    if target_file.suffix.lower() not in {".xlsx", ".pptx", ".html", ".csv"}:
+        raise ValueError("Attestory supports .xlsx, .pptx, .html, and .csv files.")
+
+    manifest_path = root / ATTESTORY_DIR / "history.json"
+    if manifest_path.exists():
+        history = json.loads(manifest_path.read_text(encoding="utf-8"))
+        commits = commits_for_artifact(history, target_key, include_legacy=False)
+        if commits and commits[-1].get("sha256") == sha256_file(target_file):
+            return {"captured": False, "record": commits[-1], "diff": None}
+
+    result = commit_file(root, target_file, message=message or "Pre-edit baseline")
+    return {"captured": True, **result}
+
+
 def workspace_status(root: Path) -> list[dict]:
     """Return a latest-commit overview for each file tracked in this workspace."""
     manifest_path = root / ATTESTORY_DIR / "history.json"

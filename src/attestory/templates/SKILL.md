@@ -6,9 +6,9 @@ description: Deterministic auditing, local Parquet versioning, and semantic diff
 # Attestory Workflow Rules for Claude Cowork and ChatGPT
 
 Whenever you work in a folder containing `.xlsx`, `.pptx`, `.html`, or `.csv` deliverables:
-1. **Before editing:** Check if `.attestory/rules.yaml` and `.attestory/changelog.md` exist. Read them first so you preserve all saved business rules, metric exclusions, and formula structures from prior sessions. If `.attestory/` does not exist, run `attestory init`.
+1. **Before editing:** Read `.attestory/rules.yaml` and `.attestory/changelog.md` if they exist so you preserve saved business rules, metric exclusions, and formula structures from prior sessions. Attestory initializes `.attestory/` automatically. For Excel files, capture the original before editing with `attestory snapshot-before <filename>` unless a supported Claude Code pre-edit hook is active.
 2. **Never overwrite dynamic Excel formulas (`=SUM(...)`, `=INDEX(...)`, etc.) with hardcoded numbers** unless explicitly instructed by the user.
-3. **After editing a supported file:** Run `attestory commit <filename> -m "<summary of changes>"` via bash/terminal. HTML snapshots include KPI/table values and external script or tracking-image domains; CSV snapshots include schema, row count, null counts, and numeric summaries.
+3. **After editing a supported file:** Run `attestory commit <filename> -m "<summary of changes>"` via bash/terminal. A snapshot first taken after an edit cannot serve as its pre-edit baseline; first Excel capture without a baseline is reported as `INCOMPLETE`. HTML snapshots include KPI/table values and external script or tracking-image domains; CSV snapshots include schema, row count, null counts, and numeric summaries.
 4. **Inspect changes:** Run `attestory diff <filename>` to review the latest semantic changes.
 5. **Share an audit receipt:** Run `attestory report <filename>` to generate a standalone HTML receipt in `.attestory/reports/`.
 6. **Self-Correction Gate:** Inspect the `Attestory Receipt` output. If any `HARDCODE OVERRIDE`, rule violation, or Excel error (`#REF!`, `#DIV/0!`, `#VALUE!`) is flagged unintentionally, fix the source file immediately and re-run `attestory commit` before presenting the result.

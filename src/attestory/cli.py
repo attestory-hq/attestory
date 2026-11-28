@@ -19,9 +19,10 @@ from attestory.engine import (
     commits_for_artifact,
     diff_file_snapshots,
     init_workspace,
+    snapshot_before,
     workspace_status,
 )
-from attestory.hooks import register_post_tool_use_hook
+from attestory.hooks import register_tool_use_hooks
 
 app = typer.Typer(
     help="Attestory — Local version control & deterministic math auditing for analytics."
@@ -89,7 +90,7 @@ def install_skill(
         False,
         "--hook",
         "--register-hook",
-        help="Register the Claude Code PostToolUse audit hook.",
+        help="Register Claude Code pre-edit snapshot and post-edit audit hooks.",
     ),
 ):
     """Install the Attestory skill into the current workspace."""
@@ -129,9 +130,9 @@ def install_skill(
             destination.write_text(skill_text, encoding="utf-8")
             installed_paths.append(str(destination.relative_to(root)))
 
-    hook_installed = False
+    hook_status = {}
     if hook:
-        hook_installed = register_post_tool_use_hook(root)
+        hook_status = register_tool_use_hooks(root)
 
     if installed_paths or hook:
         message = "[bold green]Attestory skill installed[/bold green]"
@@ -140,11 +141,15 @@ def install_skill(
                 f"[cyan]{path}[/cyan]" for path in installed_paths
             )
         if hook:
-            message += (
-                "\n[bold green]Claude Code PostToolUse hook "
-                + ("registered" if hook_installed else "already registered")
-                + "[/bold green]"
-            )
+            for event, label in (
+                ("PreToolUse", "pre-edit snapshot"),
+                ("PostToolUse", "post-edit audit"),
+            ):
+                message += (
+                    f"\n[bold green]Claude Code {label} hook "
+                    + ("registered" if hook_status[event] else "already registered")
+                    + "[/bold green]"
+                )
         message += "\n\nVerify with: [bold]attestory commit <file.xlsx>[/bold]"
         console.print(Panel.fit(message, title="Attestory"))
 
@@ -278,6 +283,84 @@ def hook_post_tool_use():
     print_machine_output(result.to_dict())
     if not result.passed:
         raise typer.Exit(1)
+
+
+@app.command("hook-pre-tool-use")
+def hook_pre_tool_use():
+    """Capture a supported file before a Claude Code edit tool changes it."""
+    event = json.load(sys.stdin)
+    if not isinstance(event, dict):
+        raise typer.BadParameter("Hook input must be a JSON object.")
+    tool_input = event.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        raise typer.BadParameter("Hook input 'tool_input' must be an object.")
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return
+    target = Path(file_path)
+    if target.suffix.lower() not in {".xlsx", ".pptx", ".csv"}:
+        return
+
+    root_value = event.get("cwd", str(Path.cwd()))
+    if not isinstance(root_value, str) or not root_value:
+        raise typer.BadParameter("Hook input 'cwd' must be a non-empty path.")
+    root = Path(root_value).expanduser().resolve()
+    if not target.is_absolute():
+        target = root / target
+    if not target.is_file():
+        print_machine_output(
+            {
+                "status": "INCOMPLETE",
+                "captured": False,
+                "reason": (
+                    "The file does not exist before this edit; no pre-edit baseline "
+                    "can be captured."
+                ),
+            }
+        )
+        return
+
+    try:
+        result = snapshot_before(
+            root, target, message="Claude Code PreToolUse baseline"
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        console.print(f"[red]Could not capture pre-edit baseline: {error}[/red]")
+        raise typer.Exit(2) from error
+    print_machine_output(
+        {
+            "status": result["record"].get("audit_status", "INCOMPLETE"),
+            "captured": result["captured"],
+            "sha256": result["record"]["sha256"],
+        }
+    )
+
+
+@app.command("snapshot-before")
+def snapshot_before_command(
+    file: Path = typer.Argument(
+        ..., exists=True, help="Existing .xlsx, .pptx, .html, or .csv file."
+    ),
+    message: str = typer.Option(
+        "", "-m", "--message", help="Optional note describing this baseline."
+    ),
+):
+    """Capture the current file as a baseline before editing it."""
+    try:
+        result = snapshot_before(Path.cwd(), file, message=message)
+    except (OSError, ValueError, RuntimeError) as error:
+        console.print(f"[red]Could not capture baseline: {error}[/red]")
+        raise typer.Exit(1) from error
+    record = result["record"]
+    action = "Captured" if result["captured"] else "Already captured"
+    console.print(
+        f"[bold green]{action} baseline[/bold green] for [cyan]{record['file']}[/cyan] "
+        f"(SHA-256: {record['sha256']})"
+    )
+    if record.get("audit_status") == "INCOMPLETE":
+        console.print(
+            "[yellow]The baseline audit is INCOMPLETE until a later comparison.[/yellow]"
+        )
 
 
 @app.command()
