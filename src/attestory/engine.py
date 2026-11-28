@@ -27,6 +27,35 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def artifact_key(root: Path, target_file: Path) -> str:
+    """Return a normalized workspace-relative key for a tracked artifact."""
+    workspace = root.expanduser().resolve()
+    target = target_file.expanduser()
+    if not target.is_absolute():
+        target = workspace / target
+    try:
+        return target.resolve().relative_to(workspace).as_posix()
+    except ValueError as error:
+        raise ValueError(
+            f"Artifact must be inside workspace {workspace}: {target}"
+        ) from error
+
+
+def commits_for_artifact(
+    history: dict, key: str, *, include_legacy: bool = True
+) -> list[dict]:
+    """Find commits for an artifact, falling back to basename-only legacy history."""
+    commits = history.get("commits", [])
+    identified = [commit for commit in commits if commit.get("artifact_key") == key]
+    if identified or not include_legacy or Path(key).name != key:
+        return identified
+    return [
+        commit
+        for commit in commits
+        if not commit.get("artifact_key") and commit.get("file") == key
+    ]
+
+
 def init_workspace(root: Path) -> Path:
     """Initialize a local .attestory/ directory with rules.yaml, history.json, and changelog.md."""
     meta_dir = root / ATTESTORY_DIR
@@ -140,12 +169,37 @@ def diff_file_snapshots(prev_pq: Path, curr_pq: Path, file_name: str) -> dict:
 
 
 def commit_file(
-    root: Path, target_file: Path, message: str = "", *, recalculate: bool = False
+    root: Path,
+    target_file: Path,
+    message: str = "",
+    *,
+    recalculate: bool = False,
+    artifact_path: str | Path | None = None,
 ) -> dict:
     """Create a new Parquet snapshot for target_file, diff against prior version, and append to changelog.md."""
+    root = root.expanduser().resolve()
+    target_file = target_file.expanduser()
+    if not target_file.is_absolute():
+        target_file = root / target_file
+    target_file = target_file.resolve()
     meta_dir = root / ATTESTORY_DIR
     if not meta_dir.exists():
         init_workspace(root)
+
+    target_key = (
+        Path(str(artifact_path).replace("\\", "/")).as_posix()
+        if artifact_path is not None
+        else artifact_key(root, target_file)
+    )
+    if (
+        Path(target_key).is_absolute()
+        or ".." in Path(target_key).parts
+        or target_key in {"", "."}
+    ):
+        raise ValueError(f"Invalid workspace-relative artifact path: {target_key}")
+    artifact_path = Path(target_key)
+    if target_file != root and not target_file.is_relative_to(root):
+        raise ValueError(f"Artifact must be inside workspace {root}: {target_file}")
 
     extension = target_file.suffix.lower()
     if extension not in {".xlsx", ".pptx", ".html", ".csv"}:
@@ -158,11 +212,19 @@ def commit_file(
     manifest_path = meta_dir / "history.json"
     history = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    file_commits = [c for c in history["commits"] if c["file"] == target_file.name]
-    next_ver = len(file_commits) + 1
-    stem = target_file.stem.replace(" ", "_")
+    for commit in history["commits"]:
+        if not commit.get("artifact_key"):
+            commit.setdefault("identity_ambiguous", True)
+            commit.setdefault(
+                "identity_warning",
+                "Legacy history stores only a basename; verify the artifact path.",
+            )
 
-    curr_pq = meta_dir / "snapshots" / f"{stem}_v{next_ver}.parquet"
+    file_commits = commits_for_artifact(history, target_key, include_legacy=False)
+    next_ver = len(file_commits) + 1
+    identity_hash = hashlib.sha256(target_key.encode("utf-8")).hexdigest()
+    stem = target_file.stem.replace(" ", "_")
+    curr_pq = meta_dir / "snapshots" / f"{stem}_{identity_hash}_v{next_ver}.parquet"
     extractors = {
         ".xlsx": extract_xlsx_to_parquet,
         ".pptx": extract_pptx_to_parquet,
@@ -184,12 +246,15 @@ def commit_file(
     diff_report = None
     if file_commits:
         prev_pq = root / file_commits[-1]["snapshot"]
-        diff_report = diff_file_snapshots(prev_pq, curr_pq, target_file.name)
+        diff_report = diff_file_snapshots(prev_pq, curr_pq, target_key)
 
-    rule_violations = evaluate_rules(root, target_file, curr_pq, history)
+    rule_violations = evaluate_rules(
+        root, target_file, curr_pq, history, artifact_key=target_key
+    )
     record = {
         "version": next_ver,
-        "file": target_file.name,
+        "file": target_key,
+        "artifact_key": target_key,
         "sha256": file_hash,
         "timestamp": datetime.now(UTC).isoformat(),
         "message": message or f"Snapshot v{next_ver}",
@@ -210,7 +275,7 @@ def commit_file(
     manifest_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
     lines = [
-        f"## `{target_file.name}` — v{next_ver} ({record['timestamp']})",
+        f"## `{target_key}` — v{next_ver} ({record['timestamp']})",
         f"- **SHA-256:** `{file_hash[:16]}...` | **Note:** {record['message']}",
     ]
     if extension == ".xlsx":
@@ -281,10 +346,12 @@ def workspace_status(root: Path) -> list[dict]:
     history = json.loads(manifest_path.read_text(encoding="utf-8"))
     latest_by_file = {}
     for commit in history.get("commits", []):
-        latest_by_file[commit["file"]] = commit
+        identity = commit.get("artifact_key") or f"legacy:{commit['file']}"
+        latest_by_file[identity] = commit
 
     status = []
-    for filename, commit in sorted(latest_by_file.items()):
+    for _, commit in sorted(latest_by_file.items()):
+        filename = commit.get("artifact_key") or commit["file"]
         stats = commit.get("stats", {})
         violations = commit.get("rule_violations", [])
         diff_summary = commit.get("diff_summary", {})
@@ -293,6 +360,8 @@ def workspace_status(root: Path) -> list[dict]:
             errors_and_violations
             or diff_summary.get("hardcode_overrides")
             or stats.get("external_references")
+            or commit.get("identity_ambiguous")
+            or not commit.get("artifact_key")
         )
         updated = datetime.fromisoformat(commit["timestamp"]).astimezone(UTC)
         status.append(

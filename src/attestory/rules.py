@@ -6,8 +6,16 @@ import yaml
 
 def _latest_snapshot(history: dict, filename: str) -> Path | None:
     commits = [
-        commit for commit in history.get("commits", []) if commit["file"] == filename
+        commit
+        for commit in history.get("commits", [])
+        if commit.get("artifact_key") == filename
     ]
+    if not commits and Path(filename).name == filename:
+        commits = [
+            commit
+            for commit in history.get("commits", [])
+            if not commit.get("artifact_key") and commit.get("file") == filename
+        ]
     return Path(commits[-1]["snapshot"]) if commits else None
 
 
@@ -135,7 +143,12 @@ def _snapshot_metric(
 
 
 def evaluate_rules(
-    root: Path, target_file: Path, curr_pq: Path, history: dict
+    root: Path,
+    target_file: Path,
+    curr_pq: Path,
+    history: dict,
+    *,
+    artifact_key: str | None = None,
 ) -> list[dict]:
     """Evaluate configured formula, numeric, and cross-file assertions."""
     rules_path = root / ".attestory" / "rules.yaml"
@@ -144,6 +157,7 @@ def evaluate_rules(
     config = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
     violations = []
     target_is_excel = target_file.suffix.lower() == ".xlsx"
+    target_key = artifact_key or target_file.relative_to(root).as_posix()
 
     if target_is_excel:
         for location in config.get("must_be_formula", []):
@@ -205,12 +219,12 @@ def evaluate_rules(
                 (pptx_file, {**check, "slide_num": check.get("slide_num")}),
                 (xlsx_file, {"location": check.get("location")}),
             )
-        if target_file.name not in {file_specs[0][0], file_specs[1][0]}:
+        if target_key not in {file_specs[0][0], file_specs[1][0]}:
             continue
 
         snapshots = []
         for filename, selector in file_specs:
-            if filename == target_file.name:
+            if filename == target_key:
                 snapshots.append(curr_pq)
             else:
                 snapshots.append(

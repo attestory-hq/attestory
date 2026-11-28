@@ -85,6 +85,13 @@ attestory watch
 Use `attestory watch --recursive` to include subdirectories, or tune its save
 debounce with `attestory watch --debounce 1.0`.
 
+Tracked artifacts are identified by their normalized workspace-relative paths,
+including extensions, so files such as `Finance/Forecast.xlsx`,
+`Sales/Forecast.xlsx`, and `Forecast.csv` have independent histories and
+snapshots. Older history entries are retained; because they contain only a
+basename, Attestory marks them as needing review rather than assuming which
+workspace path they belong to.
+
 ## Python API and agent hooks
 
 The Python API runs in-process, without starting a server or invoking the CLI:
