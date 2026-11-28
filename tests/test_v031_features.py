@@ -44,8 +44,8 @@ def test_status_lists_verified_and_rule_violating_files(tmp_path: Path, monkeypa
     assert result.exit_code == 0, result.stdout
     assert "actuals.csv" in result.stdout
     assert "Q4_Forecast.xlsx" in result.stdout
-    assert "VERIFIED" in result.stdout
-    assert "NEEDS REVIEW" in result.stdout
+    assert "PASS" in result.stdout
+    assert "FAIL" in result.stdout
     assert "Open Errors / Rule Violations" in result.stdout
 
 
@@ -141,7 +141,7 @@ def test_legacy_history_is_preserved_and_flagged_for_review(tmp_path: Path):
     assert result["record"]["version"] == 1
     assert result["record"]["file"] == "Finance/Forecast.xlsx"
     assert any(
-        entry["file"] == "Forecast.xlsx" and entry["status"] == "NEEDS REVIEW"
+        entry["file"] == "Forecast.xlsx" and entry["status"] == "INCOMPLETE"
         for entry in statuses
     )
 

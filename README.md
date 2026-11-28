@@ -107,8 +107,11 @@ if not result.passed:
 ```
 
 `snapshot` and `verify` create local snapshots. `verify` returns an
-`attestory.AuditResult` with hardcode regressions, formula errors, rule
-violations, and summary statistics. Its `to_dict()` shape matches the compact
+`attestory.AuditResult` with a `PASS`, `FAIL`, or `INCOMPLETE` status,
+hardcode regressions, formula errors, rule violations, incomplete-check reasons,
+and summary statistics. A first Excel capture is `INCOMPLETE` until a baseline
+exists. A failed check remains `FAIL` even when other checks are incomplete.
+Its `to_dict()` shape matches the compact
 JSON emitted by `attestory commit`, `diff`, `status`, and `report` with
 `--json`.
 
@@ -125,7 +128,10 @@ the project hook is specific to Claude Code.
 Edit `.attestory/rules.yaml` to add deterministic assertions. Excel formula and
 numeric rules are evaluated whenever the workbook is committed. Cross-file
 checks run when either configured file is committed and compare the latest
-snapshots available for both files:
+snapshots available for both files. Missing baselines or unsupported required
+checks are reported as `INCOMPLETE` with a reason; a mismatch or failed
+assertion is `FAIL`. `PASS` is reported only when a baseline exists and every
+required check completed successfully.
 
 ```yaml
 must_be_formula:
@@ -157,7 +163,8 @@ with selectors such as `metric_a: {column_name: Revenue, label: SUM}` and
 receipt, commit history, and changelog.
 
 Excel formula cells without cached results are flagged in the commit output and
-HTML receipt; their values cannot be used reliably in numeric assertions.
+HTML receipt; required numeric assertions that depend on those values are
+`INCOMPLETE` because their results cannot be verified.
 `attestory commit <file.xlsx> --recalculate` optionally recalculates the workbook
 with LibreOffice before snapshotting and evaluating assertions. LibreOffice must
 be installed, and recalculation updates the workbook file. When recalculation

@@ -107,7 +107,8 @@ def test_uncached_formula_is_flagged_in_commit_and_html_receipt(
     html = (tmp_path / ".attestory" / "reports" / "Model_v1_receipt.html").read_text(
         encoding="utf-8"
     )
-    assert "NEEDS REVIEW" in html
+    assert "INCOMPLETE" in html
+    assert "No prior snapshot exists" in html
     assert "UNCACHED FORMULA CACHE" in html
 
 
@@ -161,6 +162,125 @@ def test_recalculate_requires_libreoffice(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert "LibreOffice (soffice) is required" in result.stdout
+
+
+def test_first_excel_capture_is_incomplete_in_python_api(tmp_path: Path):
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["B4"] = 412
+    wb.save(workbook)
+
+    from attestory import verify
+
+    result = verify(workbook)
+
+    assert result.status == "INCOMPLETE"
+    assert result.passed is False
+    assert result.incomplete_findings == [
+        {
+            "rule": "missing_baseline",
+            "location": "Model.xlsx",
+            "reason": "No prior snapshot exists for this workbook; comparative checks cannot run.",
+        }
+    ]
+
+
+def test_first_excel_capture_status_matches_cli_and_receipt(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    init_workspace(tmp_path)
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["B4"] = 412
+    wb.save(workbook)
+
+    commit_result = runner.invoke(app, ["commit", "Model.xlsx", "--json"])
+    commit_payload = __import__("json").loads(commit_result.stdout)
+    report_result = runner.invoke(app, ["report", "Model.xlsx", "--json"])
+    report_payload = __import__("json").loads(report_result.stdout)
+    html = (tmp_path / ".attestory" / "reports" / "Model_v1_receipt.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert commit_payload["status"] == "INCOMPLETE"
+    assert "No prior snapshot exists" in commit_payload["incomplete_findings"][0]["reason"]
+    assert report_payload["status"] == commit_payload["status"]
+    assert report_payload["incomplete_findings"] == commit_payload["incomplete_findings"]
+    assert "INCOMPLETE" in html and "No prior snapshot exists" in html
+
+
+def test_unsupported_cross_file_check_is_incomplete(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    init_workspace(tmp_path)
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "cross_file_checks:\n"
+        "  - file_a: Model.xlsx\n"
+        "    file_b: legacy.xls\n"
+        "    metric_a: {location: Revenue!B4}\n"
+        "    metric_b: {location: Revenue!B4}\n",
+        encoding="utf-8",
+    )
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Revenue"
+    wb.active["B4"] = 412
+    wb.save(workbook)
+
+    result = runner.invoke(app, ["commit", "Model.xlsx", "--json"])
+    payload = __import__("json").loads(result.stdout)
+
+    assert payload["status"] == "INCOMPLETE"
+    assert any(
+        "Unsupported cross-file metric format: legacy.xls" in item["reason"]
+        for item in payload["incomplete_findings"]
+    )
+
+
+def test_failed_check_keeps_incomplete_findings_across_interfaces(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    init_workspace(tmp_path)
+    (tmp_path / ".attestory" / "rules.yaml").write_text(
+        "cross_file_checks:\n"
+        "  - file_a: Model.xlsx\n"
+        "    file_b: actuals.csv\n"
+        "    metric_a: {location: Revenue!B4}\n"
+        "    metric_b: {column_name: Revenue, label: SUM}\n"
+        "  - file_a: Model.xlsx\n"
+        "    file_b: missing.csv\n"
+        "    metric_a: {location: Revenue!B4}\n"
+        "    metric_b: {column_name: Revenue, label: SUM}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "actuals.csv").write_text("Revenue\n100\n", encoding="utf-8")
+    workbook = tmp_path / "Model.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Revenue"
+    wb.active["B4"] = 412
+    wb.save(workbook)
+    commit_file(tmp_path, tmp_path / "actuals.csv")
+
+    cli_result = runner.invoke(app, ["commit", "Model.xlsx", "--json"])
+    cli_payload = __import__("json").loads(cli_result.stdout)
+    from attestory import verify
+
+    api_result = verify(workbook)
+    report_result = runner.invoke(app, ["report", "Model.xlsx", "--json"])
+    report_payload = __import__("json").loads(report_result.stdout)
+    receipt = (tmp_path / ".attestory" / "reports" / "Model_v2_receipt.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert cli_payload["status"] == "FAIL"
+    assert cli_payload["rule_violations"]
+    assert cli_payload["incomplete_findings"]
+    assert api_result.status == "FAIL"
+    assert api_result.incomplete_findings
+    assert report_payload["status"] == "FAIL"
+    assert report_payload["incomplete_findings"]
+    assert "FAIL" in receipt and "Incomplete checks" in receipt
 
 
 def test_cli_end_to_end(tmp_path: Path, monkeypatch):

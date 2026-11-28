@@ -34,6 +34,7 @@ def machine_output(
     hardcoded_regressions: list[dict] | None = None,
     formula_errors: list[dict] | None = None,
     rule_violations: list[dict] | None = None,
+    incomplete_findings: list[dict] | None = None,
     summary_stats: dict | None = None,
 ) -> dict:
     """Build the stable JSON shape shared by machine-readable commands."""
@@ -41,6 +42,7 @@ def machine_output(
         hardcoded_regressions=hardcoded_regressions,
         formula_errors=formula_errors,
         rule_violations=rule_violations,
+        incomplete_findings=incomplete_findings,
         summary_stats=summary_stats,
     ).to_dict()
 
@@ -172,11 +174,13 @@ def status(
             latest_by_file[identity] = commit
         formula_errors = []
         violations = []
+        incomplete_findings = []
         hardcodes = []
         identity_warnings = []
         for identity, commit in latest_by_file.items():
             formula_errors.extend(commit.get("stats", {}).get("errors", []))
             violations.extend(commit.get("rule_violations", []))
+            incomplete_findings.extend(commit.get("incomplete_findings", []))
             if not commit.get("artifact_key"):
                 identity_warnings.append(
                     {
@@ -199,6 +203,7 @@ def status(
             hardcoded_regressions=hardcodes,
             formula_errors=formula_errors,
             rule_violations=violations,
+            incomplete_findings=incomplete_findings,
             summary_stats={
                 "tracked_files": len(latest_by_file),
                 "open_issues": sum(
@@ -228,7 +233,13 @@ def status(
     table.add_column("Open Errors / Rule Violations", justify="right")
     table.add_column("Status")
     for entry in entries:
-        status_style = "green" if entry["status"] == "VERIFIED" else "yellow"
+        status_style = (
+            "green"
+            if entry["status"] == "PASS"
+            else "yellow"
+            if entry["status"] == "INCOMPLETE"
+            else "red"
+        )
         table.add_row(
             entry["file"],
             f"v{entry['version']}",
@@ -307,6 +318,7 @@ def commit(
             hardcoded_regressions=hardcodes,
             formula_errors=formula_errors,
             rule_violations=violations,
+            incomplete_findings=rec.get("incomplete_findings", []),
             summary_stats={
                 "total_changes": diff["total_changes"] if diff else 0,
                 "hardcode_overrides": len(hardcodes),
@@ -318,6 +330,9 @@ def commit(
                 if diff and "value_changes" in diff
                 else 0,
                 "rule_violations": len(violations),
+                "incomplete_findings": len(
+                    rec.get("incomplete_findings", [])
+                ),
             },
         )
         print_machine_output(output)
@@ -326,7 +341,11 @@ def commit(
         return
 
     status_color = "green"
-    if (
+    if rec.get("audit_status") == "INCOMPLETE":
+        status_color = "yellow"
+    elif rec.get("audit_status") == "FAIL":
+        status_color = "red"
+    if status_color == "green" and (
         rec["rule_violations"]
         or (
             file.suffix.lower() == ".xlsx"
@@ -341,6 +360,7 @@ def commit(
         status_color = "yellow"
 
     summary_lines = [
+        f"[bold]Audit Status:[/bold] {rec.get('audit_status', 'PASS')}",
         f"[bold]File:[/bold] {rec['file']}  |  [bold]Version:[/bold] v{rec['version']}",
         f"[bold]SHA-256:[/bold] {rec['sha256'][:20]}...",
     ]
@@ -423,6 +443,16 @@ def commit(
                 str(violation.get("actual", "")),
             )
         console.print(table)
+    if rec.get("incomplete_findings"):
+        table = Table(title="INCOMPLETE CHECKS", style="yellow")
+        table.add_column("Rule")
+        table.add_column("Location")
+        table.add_column("Reason")
+        for finding in rec["incomplete_findings"]:
+            table.add_row(
+                finding["rule"], finding["location"], finding["reason"]
+            )
+        console.print(table)
 
 
 @app.command()
@@ -440,7 +470,16 @@ def diff(
     if not manifest.exists():
         if json_output:
             print_machine_output(
-                machine_output(summary_stats={"total_changes": 0, "rule_violations": 0})
+                machine_output(
+                    incomplete_findings=[
+                        {
+                            "rule": "missing_baseline",
+                            "location": file.as_posix(),
+                            "reason": "No .attestory/ history exists.",
+                        }
+                    ],
+                    summary_stats={"total_changes": 0, "rule_violations": 0},
+                )
             )
             raise typer.Exit(1)
         console.print(
@@ -454,9 +493,18 @@ def diff(
     if len(commits) < 2:
         if json_output:
             print_machine_output(
-                machine_output(summary_stats={"total_changes": 0, "rule_violations": 0})
+                machine_output(
+                    incomplete_findings=[
+                        {
+                            "rule": "missing_baseline",
+                            "location": key,
+                            "reason": f"No prior snapshot exists for {key}.",
+                        }
+                    ],
+                    summary_stats={"total_changes": 0, "rule_violations": 0},
+                )
             )
-            raise typer.Exit(0)
+            raise typer.Exit(1)
         console.print(
             f"[yellow]Need at least 2 versions of {file.name} to diff.[/yellow]"
         )
@@ -480,6 +528,7 @@ def diff(
             hardcoded_regressions=hardcodes,
             formula_errors=formula_errors,
             rule_violations=violations,
+            incomplete_findings=latest.get("incomplete_findings", []),
             summary_stats={
                 "total_changes": res["total_changes"],
                 "hardcode_overrides": len(hardcodes),
@@ -562,6 +611,7 @@ def generate_report(root: Path, filename: str) -> dict:
     hardcodes = len(diff.get("hardcode_overrides", [])) if diff else 0
     formulas = len(diff.get("formula_changes", [])) if diff else 0
     violations = latest.get("rule_violations", [])
+    incomplete_findings = latest.get("incomplete_findings", [])
     review_needed = bool(
         latest.get("stats", {}).get("errors")
         or formula_cache_warnings(latest.get("stats", {}))
@@ -571,7 +621,21 @@ def generate_report(root: Path, filename: str) -> dict:
         or latest.get("identity_ambiguous")
         or not latest.get("artifact_key")
     )
-    status = "NEEDS REVIEW" if review_needed else "VERIFIED"
+    status = latest.get("audit_status")
+    if status is None:
+        status = (
+            "FAIL"
+            if latest.get("stats", {}).get("errors") or violations or hardcodes
+            else "INCOMPLETE"
+            if (
+                incomplete_findings
+                or (
+                    key.lower().endswith(".xlsx")
+                    and latest.get("version") == 1
+                )
+            )
+            else "PASS"
+        )
     total_changes = diff["total_changes"] if diff else 0
 
     if diff is None:
@@ -658,6 +722,11 @@ def generate_report(root: Path, filename: str) -> dict:
         "Recalculate the workbook in Excel/LibreOffice.</li>"
         for item in formula_cache_warnings(latest.get("stats", {}))
     )
+    incomplete_html = "".join(
+        f"<li><strong>{escape(item['rule'])}</strong> — "
+        f"{escape(item['location'])}: {escape(item['reason'])}</li>"
+        for item in incomplete_findings
+    )
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Attestory Receipt — {escape(latest["file"])} v{latest["version"]}</title>
@@ -666,7 +735,7 @@ def generate_report(root: Path, filename: str) -> dict:
 @media(prefers-color-scheme:dark){{:root{{--bg:#111827;--card:#1f2937;--ink:#f3f4f6;--muted:#aab4c4;--line:#374151;--accent:#60a5fa;}}}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}}
 main{{max-width:1100px;margin:40px auto;padding:0 24px}}header,.card,.diff{{background:var(--card);border:1px solid var(--line);border-radius:14px}}
-header{{padding:26px;margin-bottom:18px}}h1{{margin:0 0 8px;font-size:25px}}p,.muted{{color:var(--muted)}}.badge{{display:inline-block;padding:6px 12px;border-radius:20px;font-weight:750;background:{"#b42318" if review_needed else "#067647"};color:white}}
+header{{padding:26px;margin-bottom:18px}}h1{{margin:0 0 8px;font-size:25px}}p,.muted{{color:var(--muted)}}.badge{{display:inline-block;padding:6px 12px;border-radius:20px;font-weight:750;background:{"#b42318" if status == "FAIL" else "#ad6b00" if status == "INCOMPLETE" or review_needed else "#067647"};color:white}}
 .meta{{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:18px}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}}
 .card{{padding:18px}}.card span{{display:block;color:var(--muted);font-size:13px}}.card strong{{font-size:26px}}
 .diff{{overflow:hidden}}table{{border-collapse:collapse;width:100%;font-size:14px}}th,td{{padding:12px 14px;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}}
@@ -684,6 +753,7 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
 <div class="card"><span>Formula Cache Warnings</span><strong>{len(formula_cache_warnings(latest.get("stats", {})))}</strong></div>
 <div class="card"><span>External References</span><strong>{latest.get("stats", {}).get("external_references", 0)}</strong></div></section>
 {"<section class='card violations'><strong>Rule violations</strong><ul>" + violation_html + "</ul></section>" if violations else ""}
+{"<section class='card'><strong>Incomplete checks</strong><ul>" + incomplete_html + "</ul></section>" if incomplete_html else ""}
 {"<section class='card violations'><strong>Formula cache warnings</strong><ul>" + formula_cache_html + "</ul></section>" if formula_cache_html else ""}
 <section class="diff"><table><thead><tr><th>Element</th><th>Previous</th><th>Current</th><th>Numeric delta</th><th>Change type</th></tr></thead>
 <tbody>{row_html}</tbody></table></section>
@@ -710,10 +780,12 @@ th{{background:color-mix(in srgb,var(--accent) 10%,var(--card));color:var(--ink)
         "summary": {
             "file": latest["file"],
             "version": latest["version"],
+            "status": status,
             "total_changes": total_changes,
             "hardcode_overrides": hardcodes,
             "formula_changes": formulas,
             "rule_violations": len(violations),
+            "incomplete_findings": len(incomplete_findings),
             "formula_cache_warnings": len(
                 formula_cache_warnings(latest.get("stats", {}))
             ),
@@ -740,7 +812,18 @@ def report(
         result = generate_report(root, key)
     except FileNotFoundError as error:
         if json_output:
-            print_machine_output(machine_output(summary_stats={"rule_violations": 0}))
+            print_machine_output(
+                machine_output(
+                    incomplete_findings=[
+                        {
+                            "rule": "missing_baseline",
+                            "location": file.as_posix(),
+                            "reason": str(error),
+                        }
+                    ],
+                    summary_stats={"rule_violations": 0},
+                )
+            )
             raise typer.Exit(1) from error
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
@@ -771,13 +854,24 @@ def report(
             hardcoded_regressions=hardcodes,
             formula_errors=formula_errors,
             rule_violations=violations,
+            incomplete_findings=latest.get("incomplete_findings", []),
             summary_stats=result["summary"],
         )
         print_machine_output(output)
         if not output["passed"]:
             raise typer.Exit(1)
         return
-    console.print(f"[green]HTML audit receipt written to {result['path']}[/green]")
+    status_style = (
+        "green"
+        if result["status"] == "PASS"
+        else "yellow"
+        if result["status"] == "INCOMPLETE"
+        else "red"
+    )
+    console.print(
+        f"[{status_style}]{result['status']} — HTML audit receipt written to "
+        f"{result['path']}[/{status_style}]"
+    )
 
 
 @app.command()

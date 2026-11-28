@@ -248,8 +248,39 @@ def commit_file(
         prev_pq = root / file_commits[-1]["snapshot"]
         diff_report = diff_file_snapshots(prev_pq, curr_pq, target_key)
 
-    rule_violations = evaluate_rules(
+    rule_results = evaluate_rules(
         root, target_file, curr_pq, history, artifact_key=target_key
+    )
+    rule_violations = rule_results["violations"]
+    incomplete_findings = rule_results["incomplete_findings"]
+    if extension == ".xlsx" and not file_commits:
+        incomplete_findings.append(
+            {
+                "rule": "missing_baseline",
+                "location": target_key,
+                "reason": "No prior snapshot exists for this workbook; comparative checks cannot run.",
+            }
+        )
+    for warning in stats.get("formula_cache_warnings", []):
+        if warning["warning"] == "uncached":
+            incomplete_findings.append(
+                {
+                    "rule": "formula_cache",
+                    "location": warning["location"],
+                    "reason": "The formula has no cached result, so checks that depend on its value cannot run.",
+                }
+            )
+    failed_checks = bool(
+        stats.get("errors")
+        or rule_violations
+        or (diff_report and diff_report.get("hardcode_overrides"))
+    )
+    audit_status = (
+        "FAIL"
+        if failed_checks
+        else "INCOMPLETE"
+        if incomplete_findings
+        else "PASS"
     )
     record = {
         "version": next_ver,
@@ -261,6 +292,8 @@ def commit_file(
         "snapshot": str(curr_pq.relative_to(root)),
         "stats": stats,
         "rule_violations": rule_violations,
+        "incomplete_findings": incomplete_findings,
+        "audit_status": audit_status,
         "diff_summary": {
             "total_changes": diff_report["total_changes"] if diff_report else 0,
             "hardcode_overrides": len(diff_report.get("hardcode_overrides", []))
@@ -277,7 +310,13 @@ def commit_file(
     lines = [
         f"## `{target_key}` — v{next_ver} ({record['timestamp']})",
         f"- **SHA-256:** `{file_hash[:16]}...` | **Note:** {record['message']}",
+        f"- **Audit status:** {audit_status}",
     ]
+    for finding in incomplete_findings:
+        lines.append(
+            f"- **INCOMPLETE** ({finding['rule']}) at `{finding['location']}`: "
+            f"{finding['reason']}"
+        )
     if extension == ".xlsx":
         lines.append(
             f"- **Cells:** {stats['populated_cells']} | **Excel Errors:** {len(stats['errors'])}"
@@ -356,13 +395,19 @@ def workspace_status(root: Path) -> list[dict]:
         violations = commit.get("rule_violations", [])
         diff_summary = commit.get("diff_summary", {})
         errors_and_violations = len(stats.get("errors", [])) + len(violations)
-        needs_review = bool(
-            errors_and_violations
-            or diff_summary.get("hardcode_overrides")
-            or stats.get("external_references")
-            or commit.get("identity_ambiguous")
-            or not commit.get("artifact_key")
-        )
+        audit_status = commit.get("audit_status")
+        if audit_status is None:
+            audit_status = (
+                "FAIL"
+                if errors_and_violations or diff_summary.get("hardcode_overrides")
+                else "INCOMPLETE"
+                if (
+                    filename.lower().endswith(".xlsx") and commit["version"] == 1
+                )
+                or commit.get("identity_ambiguous")
+                or not commit.get("artifact_key")
+                else "PASS"
+            )
         updated = datetime.fromisoformat(commit["timestamp"]).astimezone(UTC)
         status.append(
             {
@@ -371,7 +416,7 @@ def workspace_status(root: Path) -> list[dict]:
                 "timestamp": updated.strftime("%Y-%m-%d %H:%M:%S"),
                 "sha256": commit["sha256"],
                 "open_issues": errors_and_violations,
-                "status": "NEEDS REVIEW" if needs_review else "VERIFIED",
+                "status": audit_status,
             }
         )
     return status

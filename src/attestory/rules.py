@@ -142,6 +142,52 @@ def _snapshot_metric(
     raise ValueError(f"Unsupported cross-file metric format: {filename}")
 
 
+def _validate_metric(filename: str, selector: dict, check: dict) -> None:
+    if not isinstance(filename, str):
+        raise TypeError("Cross-file metric filenames must be strings.")
+    if not isinstance(selector, dict):
+        raise TypeError(
+            f"Cross-file metric selector for {filename} must be a mapping."
+        )
+    extension = Path(filename).suffix.lower()
+    if extension == ".xlsx":
+        if not selector.get("location") and not check.get("location"):
+            raise ValueError(f"Cross-file metric for {filename} requires a location.")
+        return
+    if extension == ".pptx":
+        if not check.get("slide_num"):
+            raise ValueError(f"Cross-file metric for {filename} requires slide_num.")
+        if not (
+            selector.get("label")
+            or selector.get("metric")
+            or check.get("label")
+            or check.get("metric")
+            or selector.get("element_id")
+            or check.get("element_id")
+        ):
+            raise ValueError(
+                f"Cross-file metric for {filename} requires label, metric, or element_id."
+            )
+        return
+    if extension == ".csv":
+        if not (selector.get("column_name") or selector.get("column")):
+            raise ValueError(
+                f"Cross-file metric for {filename} requires column_name."
+            )
+        return
+    if extension == ".html":
+        if not (
+            selector.get("label")
+            or selector.get("metric")
+            or selector.get("element_id")
+        ):
+            raise ValueError(
+                f"Cross-file metric for {filename} requires label or element_id."
+            )
+        return
+    raise ValueError(f"Unsupported cross-file metric format: {filename}")
+
+
 def evaluate_rules(
     root: Path,
     target_file: Path,
@@ -149,15 +195,21 @@ def evaluate_rules(
     history: dict,
     *,
     artifact_key: str | None = None,
-) -> list[dict]:
+) -> dict[str, list[dict]]:
     """Evaluate configured formula, numeric, and cross-file assertions."""
     rules_path = root / ".attestory" / "rules.yaml"
     if not rules_path.exists():
-        return []
+        return {"violations": [], "incomplete_findings": []}
     config = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
     violations = []
+    incomplete_findings = []
     target_is_excel = target_file.suffix.lower() == ".xlsx"
     target_key = artifact_key or target_file.relative_to(root).as_posix()
+
+    def incomplete(rule: str, location: str, reason: str) -> None:
+        incomplete_findings.append(
+            {"rule": rule, "location": location, "reason": reason}
+        )
 
     if target_is_excel:
         for location in config.get("must_be_formula", []):
@@ -181,6 +233,15 @@ def evaluate_rules(
                 for key in ("min_value", "max_value", "equals")
                 if key in assertion
             }
+            if exists and value is None:
+                _, raw_value, is_formula = _cell_value(curr_pq, location)
+                if is_formula and raw_value == "":
+                    incomplete(
+                        "numeric_assertion",
+                        location,
+                        "The formula has no cached result, so this assertion could not run.",
+                    )
+                    continue
             failed = not exists or value is None
             if value is not None:
                 failed = (
@@ -200,45 +261,140 @@ def evaluate_rules(
                 )
 
     for check in config.get("cross_file_checks", []):
+        if not isinstance(check, dict):
+            if target_is_excel:
+                incomplete(
+                    "cross_file_check",
+                    target_key,
+                    "Each cross_file_checks entry must be a mapping.",
+                )
+            continue
         first_file = check.get("file_a")
         second_file = check.get("file_b")
         if first_file and second_file:
+            metric_a = check.get("metric_a", {})
+            metric_b = check.get("metric_b", {})
+            if not isinstance(metric_a, dict) or not isinstance(metric_b, dict):
+                incomplete(
+                    "cross_file_check",
+                    f"{first_file} / {second_file}",
+                    "metric_a and metric_b must be mappings.",
+                )
+                continue
             file_specs = (
-                (first_file, check.get("metric_a", {})),
-                (second_file, check.get("metric_b", {})),
+                (first_file, metric_a),
+                (second_file, metric_b),
             )
         else:
             pptx_file = check.get("pptx_file") or check.get("presentation")
             xlsx_file = check.get("xlsx_file") or check.get("workbook")
             if not pptx_file or not xlsx_file:
-                raise ValueError(
-                    "Each cross_file_checks entry requires file_a/file_b or "
-                    "pptx_file/xlsx_file."
-                )
+                if target_is_excel:
+                    incomplete(
+                        "cross_file_check",
+                        target_key,
+                        "Each cross_file_checks entry requires file_a/file_b or "
+                        "pptx_file/xlsx_file.",
+                    )
+                continue
             file_specs = (
                 (pptx_file, {**check, "slide_num": check.get("slide_num")}),
                 (xlsx_file, {"location": check.get("location")}),
             )
+        if not all(isinstance(filename, str) for filename, _ in file_specs):
+            incomplete(
+                "cross_file_check",
+                target_key,
+                "Cross-file metric filenames must be strings.",
+            )
+            continue
         if target_key not in {file_specs[0][0], file_specs[1][0]}:
             continue
 
+        try:
+            for filename, selector in file_specs:
+                _validate_metric(filename, selector, {**check, **selector})
+        except (TypeError, ValueError) as error:
+            incomplete(
+                "cross_file_check",
+                f"{file_specs[0][0]} / {file_specs[1][0]}",
+                str(error),
+            )
+            continue
+
         snapshots = []
+        missing_snapshots = []
         for filename, selector in file_specs:
             if filename == target_key:
                 snapshots.append(curr_pq)
             else:
-                snapshots.append(
-                    _resolve_snapshot(root, _latest_snapshot(history, filename))
+                snapshot = _resolve_snapshot(root, _latest_snapshot(history, filename))
+                snapshots.append(snapshot)
+                if snapshot is None:
+                    missing_snapshots.append(filename)
+        if missing_snapshots:
+            for filename in missing_snapshots:
+                incomplete(
+                    "cross_file_check",
+                    f"{file_specs[0][0]} / {file_specs[1][0]}",
+                    f"Missing baseline snapshot for {filename}.",
                 )
-        if not all(snapshots):
             continue
-        first_exists, first_value = _snapshot_metric(
-            snapshots[0], file_specs[0][0], file_specs[0][1], check
-        )
-        second_exists, second_value = _snapshot_metric(
-            snapshots[1], file_specs[1][0], file_specs[1][1], check
-        )
-        tolerance = float(check.get("tolerance", 0.01))
+        try:
+            first_exists, first_value = _snapshot_metric(
+                snapshots[0], file_specs[0][0], file_specs[0][1], check
+            )
+            second_exists, second_value = _snapshot_metric(
+                snapshots[1], file_specs[1][0], file_specs[1][1], check
+            )
+        except (TypeError, ValueError) as error:
+            incomplete(
+                "cross_file_check",
+                f"{file_specs[0][0]} / {file_specs[1][0]}",
+                str(error),
+            )
+            continue
+
+        unavailable_formula = None
+        for index, (filename, selector) in enumerate(file_specs):
+            exists, value = (
+                (first_exists, first_value)
+                if index == 0
+                else (second_exists, second_value)
+            )
+            if exists and value is None and Path(filename).suffix.lower() == ".xlsx":
+                location = selector.get("location") or check.get("location")
+                cell_exists, raw_value, is_formula = _cell_value(
+                    snapshots[index], location
+                )
+                if cell_exists and is_formula and raw_value == "":
+                    unavailable_formula = (filename, location)
+                    break
+        if unavailable_formula:
+            filename, location = unavailable_formula
+            incomplete(
+                "cross_file_check",
+                f"{filename}:{location}",
+                "The formula has no cached result, so this check could not run.",
+            )
+            continue
+
+        try:
+            tolerance = float(check.get("tolerance", 0.01))
+        except (TypeError, ValueError) as error:
+            incomplete(
+                "cross_file_check",
+                f"{file_specs[0][0]} / {file_specs[1][0]}",
+                f"Invalid cross-file check tolerance: {error}",
+            )
+            continue
+        if tolerance < 0:
+            incomplete(
+                "cross_file_check",
+                f"{file_specs[0][0]} / {file_specs[1][0]}",
+                "Cross-file check tolerance cannot be negative.",
+            )
+            continue
         if (
             not first_exists
             or not second_exists
@@ -257,4 +413,4 @@ def evaluate_rules(
                     "description": check.get("description", ""),
                 }
             )
-    return violations
+    return {"violations": violations, "incomplete_findings": incomplete_findings}

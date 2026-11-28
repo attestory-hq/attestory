@@ -163,8 +163,8 @@ def test_report_command_generates_standalone_html(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0, result.stdout
     html = report_path.read_text(encoding="utf-8")
-    assert "NEEDS REVIEW" not in html
-    assert "VERIFIED" in html
+    assert "INCOMPLETE" not in html
+    assert "PASS" in html
     assert "Updated deck" in html
     assert "Numeric delta" in html
     assert "change-chart" in html
