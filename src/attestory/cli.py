@@ -385,7 +385,7 @@ def commit(
         result = commit_file(
             Path.cwd(), file.resolve(), message=message, recalculate=recalculate
         )
-    except RuntimeError as error:
+    except (OSError, RuntimeError) as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
     rec = result["record"]
