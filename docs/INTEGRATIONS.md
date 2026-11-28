@@ -13,6 +13,30 @@ print(result.to_dict())
 `verify()` creates a snapshot and returns `PASS`, `FAIL`, or `INCOMPLETE`
 alongside formula changes, formula errors, rule violations, and summary fields.
 
+### Shared Excel edit-and-verify workflow
+
+Assistant integrations can pass XLSX bytes directly and keep the original
+bytes untouched:
+
+```python
+import attestory
+
+prepared = attestory.prepare_excel_edit(original_bytes, filename="forecast.xlsx")
+# Pass prepared.working_copy_bytes to the spreadsheet editor.
+result = attestory.verify_excel_edit(
+    prepared,
+    candidate_bytes,
+    filename="forecast.xlsx",
+)
+print(result.to_dict())
+```
+
+The original SHA-256 and an independent working copy are captured before
+editing. Verification audits exact candidate bytes and returns a structured
+`PASS`, `FAIL`, or `INCOMPLETE` outcome, cell-level findings, and an HTML
+receipt bound to the candidate and baseline hashes. Only `PASS` sets
+`verified=True`.
+
 ## Local storage
 
 Attestory keeps audit data in the `.attestory/` directory beside the
