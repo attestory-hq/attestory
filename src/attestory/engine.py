@@ -22,6 +22,7 @@ from attestory.parsers.excel import (
 from attestory.parsers.html import diff_html_snapshots, extract_html_to_parquet
 from attestory.parsers.pptx import diff_pptx_snapshots, extract_pptx_to_parquet
 from attestory.rules import evaluate_rules
+from attestory.signing import ensure_signing_keypair, sign_manifest
 
 ATTESTORY_DIR = ".attestory"
 AUDIT_MANIFEST_SCHEMA_VERSION = 1
@@ -164,6 +165,7 @@ def _init_workspace_locked(root: Path) -> Path:
     """Initialize a workspace while its commit lock is held."""
     meta_dir = root / ATTESTORY_DIR
     (meta_dir / "snapshots").mkdir(parents=True, exist_ok=True)
+    ensure_signing_keypair(meta_dir)
 
     rules_path = meta_dir / "rules.yaml"
     if not rules_path.exists():
@@ -571,6 +573,11 @@ def _commit_file_locked(
         "findings": findings,
         "recalculation": recalculation_record,
     }
+    private_key, _ = ensure_signing_keypair(meta_dir)
+    audit_signature = sign_manifest(
+        audit_manifest,
+        private_key,
+    )
     record = {
         "version": next_ver,
         "file": target_key,
@@ -625,6 +632,7 @@ def _commit_file_locked(
         "outcome": audit_status,
         "findings": findings,
         "audit_manifest": audit_manifest,
+        "signature": audit_signature,
         "diff_summary": {
             "total_changes": diff_report["total_changes"] if diff_report else 0,
             "hardcode_overrides": len(diff_report.get("hardcode_overrides", []))

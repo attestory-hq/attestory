@@ -199,6 +199,22 @@ workbook remains byte-for-byte unchanged. When recalculation succeeds, the
 recalculated copy supplies the audit snapshot and its changed cached values are
 recorded. If recalculation fails, required checks are marked incomplete.
 
+Audit manifests use canonical JSON serialization (`sort_keys=True`, compact UTF-8
+JSON, no whitespace) and Ed25519 signatures. Each workspace keypair is stored under
+`.attestory/signing/`; the private key is excluded from source control and the public
+key may be shared as the trusted verifier key. The key ID is
+`sha256:<hex>` from the public key's DER SubjectPublicKeyInfo.
+
+Verify a saved audit offline without the workspace history:
+
+```bash
+attestory verify-manifest .attestory/history.json Model.xlsx \
+  --public-key .attestory/signing/public_key.pem --version 1
+```
+
+The verifier reports signature validity and workbook hash match separately from the
+recorded audit outcome. Use `attestory keygen` to create or report the workspace keys.
+
 HTML snapshots parse KPI/metric elements and table cells and flag externally
 hosted scripts or tracking images for review. CSV snapshots track dataset row
 counts, column types, null counts, and numeric `SUM`, `AVG`, `MIN`, and `MAX`
