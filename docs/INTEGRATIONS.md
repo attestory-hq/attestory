@@ -67,6 +67,14 @@ The Claude Code pre/post hooks preserve existing settings and only run for
 supported Claude tool events. A pre-edit capture is not a substitute for a
 candidate snapshot and cannot create a missing baseline for a new file.
 
+### Claude Cowork plugin
+
+The install-once Cowork plugin and its supported edit paths, folder
+permissions, local processing, and audit limits are documented in
+[`COWORK_PLUGIN.md`](COWORK_PLUGIN.md). The plugin uses a managed working-copy
+flow because Cowork does not provide a pre-write hook for every editor and
+script-driven change.
+
 ## Rules
 
 Edit `.attestory/rules.yaml` after initialization. A complete example is

@@ -154,6 +154,7 @@ For coverage boundaries and rule semantics, see
 - [Local storage details](docs/INTEGRATIONS.md#local-storage)
 - [Python API, hooks, server, and integrations](docs/INTEGRATIONS.md)
 - [ChatGPT Excel edit-and-verify prototype](docs/CHATGPT_ACTION.md)
+- [Claude Cowork plugin](docs/COWORK_PLUGIN.md)
 - [Rule configuration](docs/INTEGRATIONS.md#rules)
 - [Rules example](examples/rules.yaml)
 - [Labeled regression corpus](tests/fixtures/excel_verification/cases.yaml)
