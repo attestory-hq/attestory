@@ -5,6 +5,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 _NUMBER_PATTERN = re.compile(
     r"(?<![\w.])[-+]?\(?\s*(?:[$€£]\s*)?\d[\d,]*(?:\.\d+)?\s*%?\)?(?![\w.])"
@@ -44,31 +45,73 @@ def extract_pptx_to_parquet(pptx_path: Path, parquet_out: Path) -> dict:
         )
 
     for slide_num, slide in enumerate(presentation.slides, start=1):
-        for shape_idx, shape in enumerate(slide.shapes, start=1):
-            if shape.has_table:
-                for row_idx, row in enumerate(shape.table.rows, start=1):
-                    for col_idx, cell in enumerate(row.cells, start=1):
+        def walk_shapes(
+            container,
+            slide_num: int = slide_num,
+            group_path: tuple[str, ...] = (),
+        ) -> None:
+            for shape_idx, shape in enumerate(container, start=1):
+                hierarchy = (
+                    group_path + (f"group_{shape_idx}",)
+                    if shape.shape_type == MSO_SHAPE_TYPE.GROUP
+                    else group_path
+                )
+
+                if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                    walk_shapes(
+                        shape.shapes,
+                        slide_num=slide_num,
+                        group_path=hierarchy,
+                    )
+                    continue
+
+                prefix = "/".join(hierarchy)
+                prefix = f"{prefix}/" if prefix else ""
+
+                if shape.has_table:
+                    for row_idx, row in enumerate(shape.table.rows, start=1):
+                        for col_idx, cell in enumerate(row.cells, start=1):
+                            add_row(
+                                slide_num,
+                                "table",
+                                (
+                                    f"{prefix}table_r{row_idx}c{col_idx}"
+                                    if hierarchy
+                                    else f"r{row_idx}c{col_idx}"
+                                ),
+                                shape.name,
+                                cell.text.strip(),
+                            )
+                elif shape.has_chart:
+                    for series_idx, series in enumerate(shape.chart.series, start=1):
+                        for point_idx, value in enumerate(series.values, start=1):
+                            add_row(
+                                slide_num,
+                                "chart",
+                                (
+                                    f"{prefix}chart_series_{series_idx}_pt_{point_idx}"
+                                    if hierarchy
+                                    else f"series_{series_idx}_pt_{point_idx}"
+                                ),
+                                series.name,
+                                str(value),
+                            )
+                elif shape.has_text_frame:
+                    text = shape.text_frame.text.strip()
+                    if text:
                         add_row(
                             slide_num,
-                            "table",
-                            f"r{row_idx}c{col_idx}",
+                            "text",
+                            (
+                                f"{prefix}text_shape_{shape_idx}"
+                                if hierarchy
+                                else f"shape_{shape_idx}"
+                            ),
                             shape.name,
-                            cell.text.strip(),
+                            text,
                         )
-            elif shape.has_chart:
-                for series_idx, series in enumerate(shape.chart.series, start=1):
-                    for point_idx, value in enumerate(series.values, start=1):
-                        add_row(
-                            slide_num,
-                            "chart",
-                            f"series_{series_idx}_pt_{point_idx}",
-                            series.name,
-                            str(value),
-                        )
-            elif shape.has_text_frame:
-                text = shape.text_frame.text.strip()
-                if text:
-                    add_row(slide_num, "text", f"shape_{shape_idx}", shape.name, text)
+
+        walk_shapes(slide.shapes)
 
     schema = pa.schema(
         [

@@ -22,6 +22,10 @@ AI workspaces like **Claude Cowork** and **ChatGPT** make editing spreadsheets e
 - **Persistent Assertions & Receipts:** Configure formula and numeric guardrails in `.attestory/rules.yaml`, then generate self-contained HTML audit receipts.
 - **Native AI Continuity:** Install the Claude Cowork / Claude Code skill directly into your workspace with `attestory install-skill`; it reads saved rules before editing and helps catch formula mistakes before presenting results.
 
+PowerPoint snapshots recurse through nested native shape groups for text, table cells,
+and chart values. SmartArt is a separate extraction coverage gap and is not yet
+supported; track dedicated SmartArt support separately for presentations that require it.
+
 ---
 
 ## Visual Proof
