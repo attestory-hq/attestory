@@ -53,10 +53,11 @@ paths:
       operationId: editAndVerifyExcel
       summary: Compare an original XLSX with its edited candidate
       description: >
-        Prototype two-file handoff. Before calling, disclose that both XLSX
-        files will be sent to the configured Attestory backend, then obtain
-        explicit user consent. Only report PASS as verified. Always surface
-        cell_findings and incomplete_findings; INCOMPLETE is not a pass.
+        Prototype two-file handoff. Before calling, disclose that every
+        provided XLSX will be sent to the configured Attestory backend, then
+        obtain explicit user consent. original_file may be omitted to record
+        an unavailable baseline as INCOMPLETE. Only report PASS as verified.
+        Always surface cell_findings and incomplete_findings.
       requestBody:
         required: true
         content:
@@ -64,14 +65,15 @@ paths:
             schema:
               type: object
               required:
-                - original_file
                 - candidate_file
                 - confirm_backend_processing
               properties:
                 original_file:
                   type: string
                   format: binary
-                  description: Original workbook supplied by the user.
+                  description: >
+                    Original workbook supplied by the user. If absent, the
+                    result is INCOMPLETE because no baseline is available.
                 candidate_file:
                   type: string
                   format: binary
@@ -80,7 +82,7 @@ paths:
                   type: boolean
                   description: >
                     Set true only after the user has explicitly consented to
-                    sending both workbooks to this configured backend.
+                    sending the provided workbook files to this backend.
       responses:
         "200":
           description: Audit outcome and short-lived exact-candidate/receipt links

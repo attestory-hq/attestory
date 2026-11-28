@@ -119,3 +119,5 @@ untrusted network. The OpenAPI bridge specification is at
 The ChatGPT Action prototype and its two-file fallback, consent disclosure,
 and artifact-retention behavior are documented in
 [`CHATGPT_ACTION.md`](CHATGPT_ACTION.md).
+The shared Cowork/ChatGPT regression tests and the still-pending live UI smoke
+test record are in [`INTEGRATION_PARITY.md`](INTEGRATION_PARITY.md).
