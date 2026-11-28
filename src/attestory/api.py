@@ -1,10 +1,13 @@
 """In-process Python API for snapshotting and verifying supported files."""
 
+import hashlib
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from attestory.engine import commit_file
+from attestory.engine import commit_file, init_workspace
 
 
 @dataclass(frozen=True)
@@ -189,3 +192,336 @@ def verify(
         record=record,
         diff=diff,
     )
+
+
+@dataclass(frozen=True)
+class PreparedExcelEdit:
+    """An immutable capture of original XLSX bytes and their working copy."""
+
+    filename: str
+    original_sha256: str
+    working_copy: bytes
+
+    @property
+    def working_copy_bytes(self) -> bytes:
+        return self.working_copy
+
+
+@dataclass(frozen=True)
+class ExcelEditResult:
+    """Structured outcome for an edit-and-verify XLSX integration workflow."""
+
+    status: str
+    verified: bool
+    original_sha256: str | None
+    candidate_sha256: str | None
+    baseline_sha256: str | None
+    outcome: dict[str, Any]
+    findings: list[dict[str, Any]]
+    cell_findings: list[dict[str, Any]]
+    record: dict[str, Any] | None
+    diff: dict[str, Any] | None
+    receipt_html: str | None = None
+    receipt_sha256: str | None = None
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "PASS"
+
+    @property
+    def receipt(self) -> dict[str, Any] | None:
+        if self.receipt_html is None:
+            return None
+        return {
+            "format": "html",
+            "sha256": self.receipt_sha256,
+            "candidate_sha256": self.candidate_sha256,
+            "baseline_sha256": self.baseline_sha256,
+            "status": self.status,
+            "html": self.receipt_html,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "outcome": self.status,
+            "verified": self.verified,
+            "passed": self.passed,
+            "original_sha256": self.original_sha256,
+            "candidate_sha256": self.candidate_sha256,
+            "baseline_sha256": self.baseline_sha256,
+            "findings": self.findings,
+            "cell_findings": self.cell_findings,
+            "incomplete_findings": self.outcome.get("incomplete_findings", []),
+            "required_checks": self.record.get("required_checks", [])
+            if self.record
+            else [],
+            "receipt": self.receipt,
+        }
+
+
+def _excel_filename(filename: str | Path) -> str:
+    name = Path(filename).name
+    if not name:
+        name = "workbook.xlsx"
+    if Path(name).suffix.lower() != ".xlsx":
+        raise ValueError("The edit-and-verify workflow accepts XLSX bytes only.")
+    return name
+
+
+def prepare_excel_edit(
+    original_bytes: bytes | bytearray | memoryview | None = None,
+    *,
+    original: bytes | bytearray | memoryview | None = None,
+    filename: str | Path = "workbook.xlsx",
+) -> PreparedExcelEdit:
+    """Capture an original workbook and return an independent working copy."""
+    if original_bytes is None:
+        original_bytes = original
+    if original_bytes is None:
+        raise ValueError("The original XLSX baseline is unavailable.")
+
+    name = _excel_filename(filename)
+    capture = bytes(original_bytes)
+    if not capture:
+        raise ValueError("The original XLSX baseline is unavailable.")
+    return PreparedExcelEdit(
+        filename=name,
+        original_sha256=hashlib.sha256(capture).hexdigest(),
+        working_copy=capture,
+    )
+
+
+def _incomplete_excel_result(
+    *,
+    original_sha256: str | None,
+    candidate_sha256: str | None,
+    reason: str,
+    rule: str,
+) -> ExcelEditResult:
+    finding = {
+        "rule": rule,
+        "location": "workbook",
+        "reason": reason,
+    }
+    return ExcelEditResult(
+        status="INCOMPLETE",
+        verified=False,
+        original_sha256=original_sha256,
+        candidate_sha256=candidate_sha256,
+        baseline_sha256=original_sha256,
+        outcome={
+            "status": "INCOMPLETE",
+            "passed": False,
+            "incomplete_findings": [finding],
+        },
+        findings=[{"kind": "incomplete", **finding}],
+        cell_findings=[],
+        record=None,
+        diff=None,
+    )
+
+
+def verify_excel_edit(
+    original_bytes: bytes | bytearray | memoryview | PreparedExcelEdit | None = None,
+    candidate_bytes: bytes | bytearray | memoryview | None = None,
+    *,
+    original: bytes | bytearray | memoryview | PreparedExcelEdit | None = None,
+    candidate: bytes | bytearray | memoryview | None = None,
+    filename: str | Path = "workbook.xlsx",
+) -> ExcelEditResult:
+    """Audit exact original and candidate XLSX bytes with Attestory's engine."""
+    if isinstance(original_bytes, PreparedExcelEdit):
+        prepared = original_bytes
+        original_bytes = prepared.working_copy
+        if filename == "workbook.xlsx":
+            filename = prepared.filename
+    if original is None:
+        original = original_bytes
+    elif original_bytes is None:
+        original_bytes = original
+    if candidate is None:
+        candidate = candidate_bytes
+    elif candidate_bytes is None:
+        candidate_bytes = candidate
+
+    name = _excel_filename(filename)
+    original_capture = (
+        bytes(original)
+        if original is not None and not isinstance(original, PreparedExcelEdit)
+        else None
+    )
+    candidate_capture = bytes(candidate) if candidate is not None else None
+    original_sha256 = (
+        hashlib.sha256(original_capture).hexdigest()
+        if original_capture
+        else None
+    )
+    candidate_sha256 = (
+        hashlib.sha256(candidate_capture).hexdigest()
+        if candidate_capture
+        else None
+    )
+
+    if original_capture is None:
+        if candidate_capture is not None:
+            try:
+                from attestory.cli import generate_report
+
+                name = _excel_filename(filename)
+                with tempfile.TemporaryDirectory(prefix="attestory-excel-") as temporary:
+                    root = Path(temporary)
+                    workbook = root / name
+                    init_workspace(root)
+                    workbook.write_bytes(candidate_capture)
+                    result = commit_file(
+                        root,
+                        workbook,
+                        message="Assistant integration candidate without baseline",
+                    )
+                    report = generate_report(root, name)
+                    receipt_html = (
+                        root / report["path"]
+                    ).read_text(encoding="utf-8")
+            except (OSError, RuntimeError, ValueError, EOFError, zipfile.BadZipFile) as error:
+                reason = (
+                    "The original XLSX baseline is unavailable, and required "
+                    f"candidate checks could not run: {error}"
+                )
+            else:
+                record = result["record"]
+                finding = {
+                    "rule": "missing_baseline",
+                    "location": "workbook",
+                    "reason": "The original XLSX baseline is unavailable.",
+                }
+                findings = [{"kind": "incomplete", **finding}]
+                receipt_sha256 = hashlib.sha256(
+                    receipt_html.encode("utf-8")
+                ).hexdigest()
+                return ExcelEditResult(
+                    status="INCOMPLETE",
+                    verified=False,
+                    original_sha256=None,
+                    candidate_sha256=candidate_sha256,
+                    baseline_sha256=None,
+                    outcome={
+                        "status": "INCOMPLETE",
+                        "passed": False,
+                        "incomplete_findings": [finding],
+                        "required_checks": record.get("required_checks", []),
+                    },
+                    findings=findings,
+                    cell_findings=[],
+                    record=record,
+                    diff=result["diff"],
+                    receipt_html=receipt_html,
+                    receipt_sha256=receipt_sha256,
+                )
+        else:
+            reason = "The original XLSX baseline is unavailable."
+        return _incomplete_excel_result(
+            original_sha256=None,
+            candidate_sha256=candidate_sha256,
+            reason=reason,
+            rule="missing_baseline",
+        )
+    if candidate_capture is None:
+        return _incomplete_excel_result(
+            original_sha256=original_sha256,
+            candidate_sha256=None,
+            reason="The candidate XLSX is unavailable.",
+            rule="missing_candidate",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="attestory-excel-") as temporary:
+        root = Path(temporary)
+        workbook = root / name
+        try:
+            from attestory.cli import generate_report
+
+            init_workspace(root)
+            workbook.write_bytes(original_capture)
+            original_record = commit_file(
+                root,
+                workbook,
+                message="Assistant integration original baseline",
+            )
+            workbook.write_bytes(candidate_capture)
+            result = commit_file(
+                root,
+                workbook,
+                message="Assistant integration candidate",
+            )
+
+            report = generate_report(root, name)
+            report_path = root / report["path"]
+            receipt_html = report_path.read_text(encoding="utf-8")
+        except (OSError, RuntimeError, ValueError, EOFError, zipfile.BadZipFile) as error:
+            return _incomplete_excel_result(
+                original_sha256=original_sha256,
+                candidate_sha256=candidate_sha256,
+                reason=f"Required XLSX checks could not run: {error}",
+                rule="audit_unavailable",
+            )
+
+    record = result["record"]
+    diff = result["diff"]
+    status = record.get("audit_status", "INCOMPLETE")
+    baseline_sha256 = record.get("baseline_sha256") or original_record["record"]["sha256"]
+    findings = record.get("findings", [])
+    cell_findings = [
+        finding
+        for finding in findings
+        if finding.get("location") not
+        in {None, "", "workbook"}
+        or finding.get("kind") in {
+            "hardcode_override",
+            "formula_change",
+            "formula_to_blank",
+            "missing_formula_cell",
+            "value_change",
+            "formula_error",
+        }
+    ]
+    receipt_sha256 = hashlib.sha256(receipt_html.encode("utf-8")).hexdigest()
+    outcome = {
+        "status": status,
+        "passed": status == "PASS",
+        "record": record,
+        "diff": diff,
+        "incomplete_findings": record.get("incomplete_findings", []),
+        "required_checks": record.get("required_checks", []),
+    }
+    return ExcelEditResult(
+        status=status,
+        verified=status == "PASS",
+        original_sha256=original_sha256,
+        candidate_sha256=candidate_sha256,
+        baseline_sha256=baseline_sha256,
+        outcome=outcome,
+        findings=findings,
+        cell_findings=cell_findings,
+        record=record,
+        diff=diff,
+        receipt_html=receipt_html,
+        receipt_sha256=receipt_sha256,
+    )
+
+
+def audit_excel_edit(
+    original_bytes: bytes | bytearray | memoryview | PreparedExcelEdit | None = None,
+    candidate_bytes: bytes | bytearray | memoryview | None = None,
+    **kwargs: Any,
+) -> ExcelEditResult:
+    """Compatibility name for the shared Excel edit-and-verify integration API."""
+    return verify_excel_edit(original_bytes, candidate_bytes, **kwargs)
+
+
+def edit_and_verify_excel(
+    original_bytes: bytes | bytearray | memoryview | PreparedExcelEdit | None = None,
+    candidate_bytes: bytes | bytearray | memoryview | None = None,
+    **kwargs: Any,
+) -> ExcelEditResult:
+    """Prepare and audit an Excel edit through the shared integration workflow."""
+    return verify_excel_edit(original_bytes, candidate_bytes, **kwargs)

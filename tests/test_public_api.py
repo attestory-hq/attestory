@@ -3,7 +3,13 @@ from pathlib import Path
 
 import openpyxl
 
-from attestory import AuditResult, snapshot, verify
+from attestory import (
+    AuditResult,
+    audit_excel_edit,
+    prepare_excel_edit,
+    snapshot,
+    verify,
+)
 
 
 def _write_workbook(path: Path, hardcode_total: bool = False) -> None:
@@ -63,3 +69,90 @@ def test_audit_result_json_has_stable_compact_diagnostic_schema(tmp_path: Path):
     assert payload["status"] == "INCOMPLETE"
     assert payload["incomplete_findings"]
     assert ": " not in encoded
+
+
+def test_excel_edit_workflow_accepts_clean_edit_and_preserves_original():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    sheet["B2"] = 250
+    sheet["B3"] = 162
+    sheet["B4"] = 412
+
+    import io
+
+    original_buffer = io.BytesIO()
+    workbook.save(original_buffer)
+    original_bytes = original_buffer.getvalue()
+
+    prepared = prepare_excel_edit(original_bytes, filename="Revenue.xlsx")
+    assert prepared.working_copy == original_bytes
+    assert prepared.original_sha256 != ""
+
+    sheet["B2"] = 260
+    candidate_buffer = io.BytesIO()
+    workbook.save(candidate_buffer)
+    candidate_bytes = candidate_buffer.getvalue()
+
+    result = audit_excel_edit(prepared, candidate_bytes, filename="Revenue.xlsx")
+
+    assert result.status == "PASS"
+    assert result.verified is True
+    assert result.original_sha256 == prepared.original_sha256
+    assert result.candidate_sha256
+    assert result.receipt is not None
+    assert result.receipt["candidate_sha256"] == result.candidate_sha256
+    assert prepared.working_copy == original_bytes
+
+
+def test_excel_edit_workflow_detects_same_value_formula_override():
+    import io
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    sheet["B2"] = 250
+    sheet["B3"] = 162
+    sheet["B4"] = "=SUM(B2:B3)"
+    original_buffer = io.BytesIO()
+    workbook.save(original_buffer)
+
+    sheet["B4"] = 412
+    candidate_buffer = io.BytesIO()
+    workbook.save(candidate_buffer)
+
+    result = audit_excel_edit(
+        original_buffer.getvalue(),
+        candidate_buffer.getvalue(),
+        filename="Revenue.xlsx",
+    )
+
+    assert result.status == "FAIL"
+    assert result.verified is False
+    assert any(
+        finding["kind"] == "hardcode_override"
+        and finding["location"] == "Revenue!B4"
+        for finding in result.findings
+    )
+
+
+def test_excel_edit_workflow_returns_incomplete_for_missing_baseline():
+    import io
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    sheet["B2"] = 250
+    candidate_buffer = io.BytesIO()
+    workbook.save(candidate_buffer)
+
+    result = audit_excel_edit(
+        None,
+        candidate_buffer.getvalue(),
+        filename="Revenue.xlsx",
+    )
+
+    assert result.status == "INCOMPLETE"
+    assert result.verified is False
+    assert result.outcome["incomplete_findings"]
+    assert "baseline" in result.outcome["incomplete_findings"][0]["reason"].lower()
